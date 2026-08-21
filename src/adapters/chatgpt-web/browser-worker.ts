@@ -269,16 +269,86 @@ function throwIfPromptAttachmentAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException("ChatGPT prompt attachment aborted", "AbortError");
 }
 
-function promptInsertChunkEnd(text: string, offset: number): number {
-  let end = Math.min(offset + CHATGPT_PROMPT_INSERT_CHUNK_CHARS, text.length);
-  if (end >= text.length) return end;
+const CHUNK_WHITESPACE_BACKOFF_CHARS = 256;
+const TRAILING_WHITESPACE = /[\s ]/;
+
+function splitsSurrogatePair(text: string, end: number): boolean {
   const previousCodeUnit = text.charCodeAt(end - 1);
   const nextCodeUnit = text.charCodeAt(end);
-  if (previousCodeUnit >= 0xD800 && previousCodeUnit <= 0xDBFF
-    && nextCodeUnit >= 0xDC00 && nextCodeUnit <= 0xDFFF) {
-    end -= 1;
+  return previousCodeUnit >= 0xD800 && previousCodeUnit <= 0xDBFF
+    && nextCodeUnit >= 0xDC00 && nextCodeUnit <= 0xDFFF;
+}
+
+export function promptInsertChunkEnd(text: string, offset: number): number {
+  let end = Math.min(offset + CHATGPT_PROMPT_INSERT_CHUNK_CHARS, text.length);
+  if (end >= text.length) return end;
+  if (splitsSurrogatePair(text, end)) end -= 1;
+  // A chunk that ends on whitespace leaves that character last in the composer, where the surface
+  // rewrites it - a trailing space becomes U+00A0, a lone CR becomes LF - and the exact prefix
+  // check then fails on a prompt that arrived intact. Ending on a visible character avoids the
+  // rewrite entirely; a whitespace run longer than the backoff keeps the original boundary.
+  let cut = end;
+  while (cut > offset + 1 && end - cut < CHUNK_WHITESPACE_BACKOFF_CHARS
+    && TRAILING_WHITESPACE.test(text.charAt(cut - 1))) {
+    cut -= 1;
+  }
+  if (cut < end && cut > offset + 1
+    && !TRAILING_WHITESPACE.test(text.charAt(cut - 1))
+    && !splitsSurrogatePair(text, cut)) {
+    end = cut;
   }
   return end;
+}
+
+/**
+ * Length-preserving whitespace equivalences the composer applies on its own. Comparing normalized
+ * text still detects truncation and real divergence, because none of these substitutions change the
+ * character count.
+ */
+export function normalizeComposerWhitespace(text: string): string {
+  return text.replace(/\r/g, "\n").replace(/[   ]/g, " ");
+}
+
+function divergenceDetail(expected: string, observed: string, at: number): string {
+  const codePoint = (text: string): string => {
+    const point = text.codePointAt(at);
+    return point === undefined ? "none" : `U+${point.toString(16).toUpperCase().padStart(4, "0")}`;
+  };
+  return `, divergenceAt=${at}`
+    + ` expected=${JSON.stringify(expected.slice(at, at + 8))} ${codePoint(expected)}`
+    + ` actual=${JSON.stringify(observed.slice(at, at + 8))} ${codePoint(observed)}`;
+}
+
+/**
+ * A composer that keeps a clean prefix and silently drops the rest has hit its character ceiling for
+ * this account and effort: the prompt cannot be delivered by retrying, only by compacting. Any other
+ * mismatch is a transport fault the caller may retry.
+ */
+export function promptAttachmentFailure(
+  expected: string,
+  observed: string,
+  stage: "chunk" | "complete",
+): Error {
+  let commonPrefix = 0;
+  while (commonPrefix < expected.length && expected[commonPrefix] === observed[commonPrefix]) {
+    commonPrefix += 1;
+  }
+  if (observed.length > 0 && commonPrefix === observed.length && observed.length < expected.length) {
+    return new ChatGptWebAdapterError(
+      `ChatGPT composer retained only ${observed.length.toLocaleString("en-US")} of`
+      + ` ${expected.length.toLocaleString("en-US")} prompt characters and silently dropped the`
+      + " remainder, which indicates this prompt exceeds the ChatGPT composer boundary for this"
+      + " account and effort. Run /compact, then retry this Web model.",
+      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+    );
+  }
+  const detail = `(expectedChars=${expected.length}, actualChars=${observed.length},`
+    + ` commonPrefixChars=${commonPrefix}${divergenceDetail(expected, observed, commonPrefix)})`;
+  return new Error(
+    stage === "chunk"
+      ? `ChatGPT composer did not commit a complete prompt insertion chunk ${detail}`
+      : `ChatGPT composer did not preserve the complete prompt ${detail}`,
+  );
 }
 
 export interface BrowserTurn {
@@ -1184,15 +1254,12 @@ export class ChatGptBrowserWorker {
       throwIfPromptAttachmentAborted(abortSignal);
       observed = await this.attachedPromptText(page);
       throwIfPromptAttachmentAborted(abortSignal);
-      if (observed === prompt) return;
+      if (observed === prompt
+        || normalizeComposerWhitespace(observed) === normalizeComposerWhitespace(prompt)) return;
       await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
     }
     throwIfPromptAttachmentAborted(abortSignal);
-    let commonPrefix = 0;
-    while (commonPrefix < prompt.length && prompt[commonPrefix] === observed[commonPrefix]) commonPrefix += 1;
-    throw new Error(
-      `ChatGPT composer did not preserve the complete prompt (expectedChars=${prompt.length}, actualChars=${observed.length}, commonPrefixChars=${commonPrefix})`,
-    );
+    throw promptAttachmentFailure(prompt, observed, "complete");
   }
 
   private selectedConnectorControl(composer: Locator): Locator {
@@ -1498,16 +1565,12 @@ export class ChatGptBrowserWorker {
       throwIfPromptAttachmentAborted(abortSignal);
       observed = await this.attachedPromptText(page);
       throwIfPromptAttachmentAborted(abortSignal);
-      if (observed === expected) return;
+      if (observed === expected
+        || normalizeComposerWhitespace(observed) === normalizeComposerWhitespace(expected)) return;
       await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
     } while (Date.now() < deadline);
     throwIfPromptAttachmentAborted(abortSignal);
-    let commonPrefix = 0;
-    while (commonPrefix < expected.length && expected[commonPrefix] === observed[commonPrefix]) commonPrefix += 1;
-    throw new Error(
-      `ChatGPT composer did not commit a complete prompt insertion chunk`
-      + ` (expectedChars=${expected.length}, actualChars=${observed.length}, commonPrefixChars=${commonPrefix})`,
-    );
+    throw promptAttachmentFailure(expected, observed, "chunk");
   }
 
   private async verifyConnectorExclusive(): Promise<string> {

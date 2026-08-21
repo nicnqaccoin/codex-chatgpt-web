@@ -1,6 +1,8 @@
 import type { CodexAssistantContentPart, CodexContentPart, CodexMessage, CodexParsedRequest } from "../../types";
 import { isOnePixelPngDataUrl, isReadableCompactionSummaryText } from "../../responses/compaction";
+import { ChatGptWebAdapterError } from "./adapter-error";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
+import { CHATGPT_WEB_BACKEND_MODEL, resolveChatGptWebTransportLimits } from "../../chatgpt-web-models";
 import {
   CHATGPT_LUNA_CHECKPOINT_MARKER,
   CHATGPT_LUNA_CHECKPOINT_MAX_TOKENS,
@@ -56,6 +58,64 @@ const DROPPED_IMAGE_NOTE =
   `[older image not attached: ChatGPT accepts at most ${CHATGPT_MAX_INPUT_IMAGES} per message]`;
 
 /**
+ * Codex desktop injects blocks that only its own UI consumes: the memory-citation contract, the
+ * catalog of plugins the user has *not* installed, and the cross-project memory digest. Replaying
+ * them costs a measured ~3,900 tokens per turn against the composer ceiling and gives the model
+ * nothing, so they are dropped from the browser replay only. Codex keeps them locally.
+ */
+const DESKTOP_ONLY_REPLAY_BLOCKS: readonly RegExp[] = [
+  /<oai-mem-citation>[\s\S]*?<\/oai-mem-citation>/g,
+  /<recommended_plugins>[\s\S]*?<\/recommended_plugins>/g,
+  /\n?## What.s in Memory[\s\S]*?(?=\n<skills_instructions>)/g,
+];
+
+export function withoutDesktopOnlyReplayBlocks(text: string): string {
+  if (text.length < 2_000) return text;
+  let slimmed = text;
+  for (const block of DESKTOP_ONLY_REPLAY_BLOCKS) slimmed = slimmed.replace(block, "\n");
+  return slimmed.length < text.length ? slimmed : text;
+}
+
+/** Tool results this recent stay verbatim; the task is usually still acting on them. */
+export const CHATGPT_VERBATIM_TOOL_RESULT_MESSAGES = 6;
+const TOOL_RESULT_HEAD_CHARS = 4_000;
+const TOOL_RESULT_TAIL_CHARS = 2_000;
+
+function elideToolResultText(text: string): string {
+  if (text.length <= TOOL_RESULT_HEAD_CHARS + TOOL_RESULT_TAIL_CHARS + 400) return text;
+  const elided = text.length - TOOL_RESULT_HEAD_CHARS - TOOL_RESULT_TAIL_CHARS;
+  return `${text.slice(0, TOOL_RESULT_HEAD_CHARS)}\n`
+    + `[... ${elided.toLocaleString("en-US")} characters elided from this older tool result ...]\n`
+    + text.slice(text.length - TOOL_RESULT_TAIL_CHARS);
+}
+
+/**
+ * A single Visualize apply_patch result was measured at 29,327 characters. Replaying every such
+ * result verbatim burns the composer ceiling on output the task has already consumed, so older tool
+ * results keep a head and tail with an explicit marker instead.
+ */
+export function withElidedOlderToolResults(messages: readonly CodexMessage[]): CodexMessage[] {
+  const firstVerbatim = messages.length - CHATGPT_VERBATIM_TOOL_RESULT_MESSAGES;
+  if (firstVerbatim <= 0) return [...messages];
+  return messages.map((message, index) => {
+    if (index >= firstVerbatim || message.role !== "toolResult") return message;
+    if (typeof message.content === "string") {
+      const elided = elideToolResultText(message.content);
+      return elided === message.content ? message : { ...message, content: elided };
+    }
+    let changed = false;
+    const content = message.content.map(part => {
+      if (part.type !== "text") return part;
+      const elided = elideToolResultText(part.text);
+      if (elided === part.text) return part;
+      changed = true;
+      return { ...part, text: elided };
+    });
+    return changed ? { ...message, content } : message;
+  });
+}
+
+/**
  * Every turn opens a fresh Temporary Chat, so ChatGPT keeps nothing from the previous one: an image
  * the task still reasons about has to be re-attached on each turn or it stops existing for the
  * model. Carrying the conversation's images forward is therefore the contract, not a leak - the
@@ -72,15 +132,17 @@ function inputContent(
   images: ChatGptWebPromptImage[],
   budget: ImageBudget,
 ): unknown {
-  if (typeof content === "string") return content;
+  if (typeof content === "string") return withoutDesktopOnlyReplayBlocks(content);
   const semantic = content.filter(part =>
     part.type !== "image" || !isOnePixelPngDataUrl(part.imageUrl)
   );
   if (!semantic.some(part => part.type === "image")) {
-    return semantic.filter(part => part.type === "text").map(part => part.text).join("\n");
+    return withoutDesktopOnlyReplayBlocks(
+      semantic.filter(part => part.type === "text").map(part => part.text).join("\n"),
+    );
   }
   return semantic.map(part => {
-    if (part.type === "text") return { type: "text", text: part.text };
+    if (part.type === "text") return { type: "text", text: withoutDesktopOnlyReplayBlocks(part.text) };
     budget.seen += 1;
     if (budget.seen <= budget.dropped) return { type: "text", text: DROPPED_IMAGE_NOTE };
     const ref = `codex-input-image-${images.length + 1}`;
@@ -150,6 +212,47 @@ export function withoutSupersededModelSwitchContracts(messages: readonly CodexMe
   return messages.filter((_message, index) => !dropped.has(index));
 }
 
+/**
+ * Instruction blocks the task cannot work without: the desktop contract that carries the
+ * Images/Visuals rules the Visualize plugin depends on, the environment and AGENTS.md contract, the
+ * skill catalog, and per-plugin capability notes. Fit recovery drops ordinary conversation instead
+ * of these, whatever their position in the history.
+ */
+const INSTRUCTION_BLOCK_MARKERS: readonly string[] = [
+  "<app-context>",
+  "<recommended_plugins>",
+  "<environment_context>",
+  "<skills_instructions>",
+  "<model_switch>",
+  "<permissions instructions>",
+  "<collaboration_mode>",
+  "<apps_instructions>",
+  "<plugins_instructions>",
+  "# AGENTS.md",
+  "Capabilities from the",
+];
+
+export function isInstructionMessage(message: CodexMessage): boolean {
+  if (message.role === "assistant" || message.role === "toolResult") return false;
+  const text = (typeof message.content === "string"
+    ? message.content
+    : message.content.map(part => part.type === "text" ? part.text : "").join("\n")).trimStart();
+  return INSTRUCTION_BLOCK_MARKERS.some(marker => text.startsWith(marker));
+}
+
+/**
+ * Oldest droppable message, or -1 when nothing may be discarded. The newest message is the live
+ * request - for compaction, the summarization instruction itself - so it is never a candidate.
+ */
+export function nextDroppableIndex(messages: readonly CodexMessage[]): number {
+  const newest = messages.length - 1;
+  for (const [index, message] of messages.entries()) {
+    if (index === newest || isInstructionMessage(message)) continue;
+    return index;
+  }
+  return -1;
+}
+
 function messageEnvelope(
   message: CodexMessage,
   images: ChatGptWebPromptImage[],
@@ -166,6 +269,41 @@ function messageEnvelope(
   }
   if (message.role === "assistant") return { role: "assistant", content: assistantContent(message.content) };
   return { role: message.role, content: inputContent(message.content, images, budget) };
+}
+
+/**
+ * A compaction that returns the same payload it started from cannot make progress: Codex compacts,
+ * the next turn re-crosses the threshold immediately, and the pair repeats forever. Three
+ * compactions inside the window landing within 3% of each other is that state, and it is worth one
+ * clear error instead of an unbounded loop. Sizes observed during the 2026-08-21 livelock:
+ * 95,137 / 94,058 / 94,261 bytes.
+ */
+const COMPACTION_STALL_WINDOW_MS = 600_000;
+const COMPACTION_STALL_SAMPLES = 3;
+const COMPACTION_STALL_SPREAD = 0.03;
+
+let compactionPromptSizes: { at: number; bytes: number }[] = [];
+
+/** Testing seam: forget observed compaction sizes. */
+export function resetCompactionStallTracking(): void {
+  compactionPromptSizes = [];
+}
+
+export function noteCompactionPromptSize(bytes: number, now = Date.now()): void {
+  compactionPromptSizes = compactionPromptSizes.filter(sample => now - sample.at < COMPACTION_STALL_WINDOW_MS);
+  compactionPromptSizes.push({ at: now, bytes });
+  if (compactionPromptSizes.length < COMPACTION_STALL_SAMPLES) return;
+  const recent = compactionPromptSizes.slice(-COMPACTION_STALL_SAMPLES).map(sample => sample.bytes);
+  const largest = Math.max(...recent);
+  if (largest - Math.min(...recent) > largest * COMPACTION_STALL_SPREAD) return;
+  compactionPromptSizes = [];
+  throw new ChatGptWebAdapterError(
+    `ChatGPT Web compaction is no longer reducing this session: ${COMPACTION_STALL_SAMPLES} compactions`
+    + ` stayed within ${Math.round(COMPACTION_STALL_SPREAD * 100)}% of ${largest.toLocaleString("en-US")} JSON bytes.`
+    + " The irreducible instruction floor already fills the context window, so compacting again cannot help."
+    + " Start a new Codex session to continue this work.",
+    { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+  );
 }
 
 export function chatGptReadOnlyContextWarning(
@@ -294,27 +432,45 @@ export function compileChatGptWebPrompt(
     return { text, images };
   };
 
-  let sourceMessages = withoutSupersededModelSwitchContracts(parsed.context.messages);
+  let sourceMessages = withElidedOlderToolResults(
+    withoutSupersededModelSwitchContracts(parsed.context.messages),
+  );
   const initialMessageCount = sourceMessages.length;
   let compiled = build(sourceMessages);
-  if (!parsed._compactionRequest) return compiled;
 
-  const exceedsCompactionBudget = (): boolean => (
-    chatGptPromptJsonBytes(compiled.text) > CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET
+  // A compaction request is bounded by the edge's JSON body budget; a normal turn is bounded by the
+  // composer character ceiling measured for this account and effort, which is far larger on Pro.
+  const composerCharLimit = parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID
+    ? undefined
+    : resolveChatGptWebTransportLimits(
+      CHATGPT_WEB_BACKEND_MODEL,
+      mode.effort,
+      capabilities,
+    ).browserComposerCharLimit;
+  const exceedsBudget = (): boolean => (
+    parsed._compactionRequest
+      ? chatGptPromptJsonBytes(compiled.text) > CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET
+      : composerCharLimit !== undefined && compiled.text.length > composerCharLimit
   );
 
-  // Match native Codex compaction recovery: discard oldest history items one at a time until the
-  // summarization request fits. Never discard the final compaction instruction itself, and rebuild
-  // image references after every trim so removed messages cannot leave orphaned attachments.
-  while (
-    exceedsCompactionBudget()
-    && sourceMessages.length > 1
-  ) {
-    sourceMessages = sourceMessages.slice(1);
+  // Match native Codex compaction recovery: discard oldest history one item at a time until the
+  // request fits, and rebuild image references after every trim so removed messages cannot leave
+  // orphaned attachments. Normal turns need the same recovery, because a turn that overflows the
+  // composer otherwise dies at the wall with the prompt half typed. Neither kind may discard the
+  // instruction contract: a model that loses the Images/Visuals rules silently produces worse work
+  // than one that loses old conversation.
+  while (exceedsBudget()) {
+    const droppable = nextDroppableIndex(sourceMessages);
+    if (droppable < 0) break;
+    sourceMessages = [...sourceMessages.slice(0, droppable), ...sourceMessages.slice(droppable + 1)];
     compiled = build(sourceMessages);
   }
+
+  if (!parsed._compactionRequest) return compiled;
+
   const encodedBytes = chatGptPromptJsonBytes(compiled.text);
-  if (exceedsCompactionBudget()) {
+  noteCompactionPromptSize(encodedBytes);
+  if (exceedsBudget()) {
     throw new Error(
       `ChatGPT Web compaction prompt still requires ${encodedBytes.toLocaleString("en-US")} JSON bytes after all older history was trimmed; the final compaction instruction alone exceeds the browser compaction budget`,
     );

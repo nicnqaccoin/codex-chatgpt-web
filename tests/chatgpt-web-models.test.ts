@@ -74,19 +74,19 @@ describe("fixed ChatGPT Web model routes", () => {
     });
     expect(resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "medium", plus)).toEqual({
       contextWindow: 90_000,
-      effectiveContextWindowPercent: 89,
-      autoCompactTokenLimit: 80_000,
+      effectiveContextWindowPercent: 67,
+      autoCompactTokenLimit: 60_000,
     });
     expect(resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "high", plus)).toEqual({
       contextWindow: 90_000,
-      effectiveContextWindowPercent: 89,
-      autoCompactTokenLimit: 80_000,
+      effectiveContextWindowPercent: 67,
+      autoCompactTokenLimit: 60_000,
     });
     expect(resolveChatGptWebTransportLimits(CHATGPT_WEB_BACKEND_MODEL, "low", plus)).toEqual({
       browserComposerCharLimit: 211_256,
     });
     expect(resolveChatGptWebTransportLimits(CHATGPT_WEB_BACKEND_MODEL, "medium", plus)).toEqual({
-      browserComposerCharLimit: 1_048_572,
+      browserComposerCharLimit: 110_000,
     });
     expect(() => resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "xhigh", plus))
       .toThrow("unavailable effort");

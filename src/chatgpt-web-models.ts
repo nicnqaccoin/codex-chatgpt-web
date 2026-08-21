@@ -17,9 +17,18 @@ export type ChatGptWebAdapterEffort = "low" | "medium" | "high" | "xhigh" | "max
 export const CHATGPT_WEB_INSTANT_CONTEXT_WINDOW = 41_000;
 export const CHATGPT_WEB_INSTANT_AUTO_COMPACT_TOKEN_LIMIT = 32_000;
 export const CHATGPT_WEB_MEDIUM_HIGH_CONTEXT_WINDOW = 90_000;
-export const CHATGPT_WEB_MEDIUM_HIGH_AUTO_COMPACT_TOKEN_LIMIT = 80_000;
+/**
+ * Measured on a Plus account: the medium/high composer stops accepting text at ~112,000 characters,
+ * and real sessions encode at 2.63-2.68 characters per token, so the transport ceiling is ~41,000
+ * tokens. Compaction must fire below that ceiling but well above the irreducible instruction floor
+ * (~19,000 tokens of desktop contract, tool schemas and base instructions). 80,000 was never
+ * reachable and let turns die at the composer wall; 24,000 sat inside the floor and compacted on
+ * every single turn. 60,000 leaves ~41,000 tokens of working room while prompt fit recovery keeps
+ * the encoded message under the character wall.
+ */
+export const CHATGPT_WEB_MEDIUM_HIGH_AUTO_COMPACT_TOKEN_LIMIT = 60_000;
 export const CHATGPT_WEB_INSTANT_COMPOSER_CHAR_LIMIT = 211_256;
-export const CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT = 1_048_572;
+export const CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT = 110_000;
 /** Hidden ChatGPT product prompt and Codex Native schema reserve included in usage estimates. */
 export const CHATGPT_WEB_PLATFORM_RESERVE_TOKENS = 8_192;
 /** Pro-account usable browser windows and separately measured one-message boundaries. */

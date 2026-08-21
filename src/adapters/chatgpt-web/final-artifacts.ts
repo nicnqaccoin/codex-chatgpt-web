@@ -51,6 +51,34 @@ function priorVisualizationDirectories(
 }
 
 /**
+ * Codex content references are delimited by private-use sentinels; the app parses those, not the
+ * bare word. Every producer here must go through this helper so a reference is never emitted
+ * without them.
+ */
+function visualizationReference(path: string): string {
+  return `visualize${JSON.stringify({ path })}`;
+}
+
+/** Codex desktop's own artifact directory; only the Visualize skill publishes finished HTML there. */
+const VISUALIZATION_DIRECTORY = /[\\/]\.codex[\\/]visualizations[\\/]/i;
+const VISUALIZATION_HTML_PATH = /[A-Za-z]:[\\/][^"'`,;\s]*?\.html|\/[^"'`,;\s]*?\.html/g;
+
+function publishedVisualizationPath(
+  messages: readonly CodexMessage[],
+  afterIndex: number,
+): string | undefined {
+  let published: string | undefined;
+  for (const message of messages.slice(afterIndex + 1)) {
+    if (message.role !== "toolResult" || message.isError) continue;
+    for (const match of textContent(message.content).matchAll(VISUALIZATION_HTML_PATH)) {
+      const path = match[0];
+      if (isAbsoluteHtmlPath(path) && VISUALIZATION_DIRECTORY.test(path)) published = path;
+    }
+  }
+  return published;
+}
+
+/**
  * Recover the artifact reference required by the bundled Visualize skill from trusted successful
  * apply_patch output. ChatGPT Web occasionally finishes with prose after creating the HTML and
  * omits the Codex-only content-reference directive, leaving the app's Result panel empty.
@@ -60,6 +88,14 @@ export function requiredVisualizationReference(parsed: CodexParsedRequest): stri
   const messages = parsed.context.messages;
   const userIndex = latestUserIndex(messages);
   if (userIndex < 0) return undefined;
+
+  // The skill writes the artifact with a workspace-relative apply_patch and then copies it into the
+  // app's own visualization directory with a shell command, so neither the absolute-path rule nor
+  // the apply_patch rule below sees the finished file. Anything landing in that directory during
+  // this turn is by definition the artifact the Result panel is waiting for, and reading it from
+  // the tool results survives compaction, which erases the historical directives inheritance needs.
+  const publishedPath = publishedVisualizationPath(messages, userIndex);
+  if (publishedPath) return visualizationReference(publishedPath);
   const user = messages[userIndex]!;
   if (user.role !== "user") return undefined;
   const explicitInvocation = VISUALIZE_PLUGIN.test(textContent(user.content));
