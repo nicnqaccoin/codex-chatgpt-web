@@ -90,7 +90,7 @@ const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
  * ChatGPT applies composer state asynchronously, and a fast host can reach the next step before the
  * editor has taken the previous one. This is headroom for that, not a readiness check.
  */
-export const CHATGPT_UI_SETTLE_MS = 50;
+export const CHATGPT_UI_SETTLE_MS = 250;
 
 const settleChatGptUi = (): Promise<void> => (
   new Promise(resolveSettle => setTimeout(resolveSettle, CHATGPT_UI_SETTLE_MS))
@@ -103,6 +103,9 @@ const settleChatGptUi = (): Promise<void> => (
  * click then lands on a sibling row.
  */
 export const CHATGPT_MENU_ANIMATION_SETTLE_MS = 500;
+
+/** Overlapping navigations abort each other; the target never changes, so a bounded retry is safe. */
+export const CHATGPT_NAVIGATION_ABORT_RETRIES = 2;
 
 const settleChatGptMenuAnimation = (): Promise<void> => (
   new Promise(resolveSettle => setTimeout(resolveSettle, CHATGPT_MENU_ANIMATION_SETTLE_MS))
@@ -1207,10 +1210,24 @@ export class ChatGptBrowserWorker {
     // document and made the first verification race a second SPA bootstrap. A leased turn starts on
     // about:blank and therefore still performs exactly one navigation through this same method.
     if (page.url() !== CHATGPT_TEMPORARY_CHAT_URL) {
-      await page.goto(CHATGPT_TEMPORARY_CHAT_URL, {
-        waitUntil: "domcontentloaded",
-        timeout: 60_000,
-      });
+      // A leased tab is handed over while the launcher's own about:blank navigation may still be
+      // committing, and Chromium answers the overlapping request by aborting this one before it
+      // reaches the network. The navigation never started, so retrying is safe, and it is the
+      // difference between a retried turn and a turn the user watches fail.
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          await page.goto(CHATGPT_TEMPORARY_CHAT_URL, {
+            waitUntil: "domcontentloaded",
+            timeout: 60_000,
+          });
+          break;
+        } catch (error) {
+          const aborted = error instanceof Error && error.message.includes("net::ERR_ABORTED");
+          if (!aborted || attempt >= CHATGPT_NAVIGATION_ABORT_RETRIES) throw error;
+          await captureDiagnostic?.(`temporary-chat-navigation-aborted-${attempt + 1}`);
+          await settleChatGptUi();
+        }
+      }
       await captureDiagnostic?.("temporary-chat-navigation-complete");
     }
     let composer: Locator;

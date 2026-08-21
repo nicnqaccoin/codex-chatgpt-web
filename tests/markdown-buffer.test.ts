@@ -27,6 +27,30 @@ describe("ChatGptMarkdownBuffer Responsiveness & Stability", () => {
     expect(final.markdown).toBe("First paragraph\n\nSecond paragraph");
   });
 
+  // ChatGPT renders inline math as plain text and lets KaTeX rewrite it a few hundred milliseconds
+  // later. A default window short enough to commit the pre-hydration block streams "F" and "x" as
+  // separate lines, and an append-only Responses delta cannot be retracted once it is sent.
+  test("default stability window outlasts ChatGPT's late KaTeX hydration", () => {
+    const buffer = new ChatGptMarkdownBuffer();
+    const t0 = 1000;
+    const tail: ChatGptMarkdownSegment = { key: "1", html: "<p>tail</p>", text: "tail", streamable: false };
+    const preHydration: ChatGptMarkdownSegment[] = [
+      { key: "0", html: "<p>F<sub>x</sub></p>", text: "F\nx", streamable: true },
+      tail,
+    ];
+
+    expect(buffer.observe(preHydration, t0)).toBe("");
+    expect(buffer.observe(preHydration, t0 + 500)).toBe("");
+
+    const hydrated: ChatGptMarkdownSegment[] = [
+      { key: "0", html: '<p><span class="katex">F_x</span></p>', text: "F_x", streamable: true },
+      tail,
+    ];
+    expect(buffer.observe(hydrated, t0 + 600)).toBe("");
+    // Markdown-escaped, and crucially the hydrated text rather than the split "F\nx".
+    expect(buffer.observe(hydrated, t0 + 1400)).toBe("F\\_x");
+  });
+
   test("handles list items within a group using single newline separators", () => {
     const buffer = new ChatGptMarkdownBuffer(m => m, 100);
 
