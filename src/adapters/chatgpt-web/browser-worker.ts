@@ -265,6 +265,18 @@ export const CHATGPT_COMPOSER_DOCUMENT_END_KEY = process.platform === "darwin"
   ? "Meta+ArrowDown"
   : "Control+End";
 
+/**
+ * The effort control renders its current selection as its own label. Whitespace and casing come
+ * from the product surface, so compare on a collapsed copy and let any mismatch reselect.
+ */
+export function normalizeEffortLabel(label: string | null): string {
+  return (label ?? "").replace(/\s+/g, " ").trim();
+}
+
+async function effortControlLabel(control: Locator): Promise<string> {
+  return normalizeEffortLabel(await control.innerText().catch(() => null));
+}
+
 function throwIfPromptAttachmentAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException("ChatGPT prompt attachment aborted", "AbortError");
 }
@@ -1011,6 +1023,13 @@ export class ChatGptBrowserWorker {
     await settleChatGptUi();
     await throwIfChatGptRateLimitDialog(page);
     await captureDiagnostic?.("effort-control-ready");
+    // ChatGPT carries the last selected effort into a fresh Temporary Chat, so the menu dance is
+    // usually a no-op that still costs about a second of every turn. The control's own label is the
+    // same signal a person reads; anything but an exact match falls through to the full selection.
+    if (await effortControlLabel(currentEffort) === mode.displayLabel) {
+      await captureDiagnostic?.("effort-already-selected");
+      return mode;
+    }
     const effortMenu = page.locator(CHATGPT_EFFORT_MENU_SELECTOR).last();
     const menuVisible = await effortMenu.isVisible().catch(() => false);
     const menuExpanded = await currentEffort.getAttribute("aria-expanded").catch(() => null);
