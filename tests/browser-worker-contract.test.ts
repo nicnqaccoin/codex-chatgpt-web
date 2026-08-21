@@ -8,6 +8,23 @@ import { CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnector
 import { parseChatGptEffortSliderState } from "../src/chatgpt-session";
 import type { CodexParsedRequest } from "../src/types";
 
+// The stop button stays visible for the whole turn, so treating it as activity refreshed the idle
+// timer on every poll and the stalled-turn diagnostic could never fire. A turn that looks busy and
+// produces nothing is precisely the one worth capturing, and one ran ten minutes unrecorded.
+test("a visible stop button is not counted as turn progress", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const runningBranch = workerSource.slice(
+    workerSource.indexOf("if (running) sawRunning = true;"),
+    workerSource.indexOf("if (snapshot.responsePresent) {"),
+  );
+
+  expect(runningBranch).not.toBe("");
+  expect(runningBranch).not.toContain("lastActivityAt");
+  // The signals that do mean progress must still refresh it.
+  expect(workerSource).toContain("if (snapshot.visibleText !== lastObservedVisibleText)");
+  expect(workerSource).toContain("Date.now() - lastActivityAt >= 30_000");
+});
+
 test("browser turn orchestration retains owned prompt insertion and semantic submission", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
   const runBrowserTurn = workerSource.slice(workerSource.indexOf("  private async runBrowserTurn("));

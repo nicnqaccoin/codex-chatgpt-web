@@ -2214,10 +2214,12 @@ export class ChatGptBrowserWorker {
         const snapshot = await this.responseDomSnapshot(responseTurn);
         const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
         const running = await stop.isVisible().catch(() => false);
-        if (running) {
-          sawRunning = true;
-          lastActivityAt = Date.now();
-        }
+        // A visible stop button says ChatGPT considers the turn open, not that it is producing
+        // anything, and it stays visible for the whole turn. Counting it as activity refreshed the
+        // idle timer on every poll and the stalled-turn diagnostic could never fire - which is
+        // exactly backwards, because a turn that looks busy and produces nothing is the one worth
+        // capturing. Progress is the signals below: visible text, trace blocks, streamed deltas.
+        if (running) sawRunning = true;
         if (snapshot.responsePresent) {
           if (!capturedResponse) {
             capturedResponse = true;
