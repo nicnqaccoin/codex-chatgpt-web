@@ -1,6 +1,7 @@
 import type { CodexAssistantContentPart, CodexContentPart, CodexMessage, CodexParsedRequest } from "../../types";
 import { isOnePixelPngDataUrl, isReadableCompactionSummaryText } from "../../responses/compaction";
 import { ChatGptWebAdapterError } from "./adapter-error";
+import { appendDiagnosticRecord } from "./diagnostics-log";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { CHATGPT_WEB_BACKEND_MODEL, resolveChatGptWebTransportLimits } from "../../chatgpt-web-models";
 import {
@@ -306,6 +307,21 @@ export function noteCompactionPromptSize(bytes: number, now = Date.now()): void 
   );
 }
 
+/**
+ * Fit recovery silently removed history until tonight: Codex still believed the model held the whole
+ * task, the model held part of it, and nobody was told. A model that knows its view is partial says
+ * so instead of asserting confidently about work it can no longer see.
+ */
+export function omittedHistoryNotice(omittedMessages: number): string[] {
+  if (omittedMessages <= 0) return [];
+  return [
+    `${omittedMessages.toLocaleString("en-US")} older task message(s) were omitted from the context`
+    + " below so this turn fits the ChatGPT composer. Instruction blocks and the newest history are"
+    + " complete. If the request depends on omitted earlier work, say exactly that and ask for the"
+    + " missing detail instead of guessing.",
+  ];
+}
+
 export function chatGptReadOnlyContextWarning(
   parsed: CodexParsedRequest,
   capabilities: ChatGptWebCapabilities,
@@ -409,7 +425,10 @@ export function compileChatGptWebPrompt(
       "The task context is complete. Execute the latest active user request now under the capability contract above.",
       "</codex_transport_resume>",
     ];
-  const build = (sourceMessages: readonly CodexMessage[]): CompiledChatGptWebPrompt => {
+  const build = (
+    sourceMessages: readonly CodexMessage[],
+    omittedMessages = 0,
+  ): CompiledChatGptWebPrompt => {
     const images: ChatGptWebPromptImage[] = [];
     const budget: ImageBudget = {
       seen: 0,
@@ -421,6 +440,7 @@ export function compileChatGptWebPrompt(
       ...sharedContract,
       ...transportContract,
       ...checkpointContract,
+      ...omittedHistoryNotice(omittedMessages),
       captureLunaCheckpoint
         ? "Return the complete answer that the outer Codex task should receive, then the required private checkpoint tail."
         : "Return only the answer that the outer Codex task should receive.",
@@ -432,9 +452,10 @@ export function compileChatGptWebPrompt(
     return { text, images };
   };
 
-  let sourceMessages = withElidedOlderToolResults(
-    withoutSupersededModelSwitchContracts(parsed.context.messages),
-  );
+  const contractedMessages = withoutSupersededModelSwitchContracts(parsed.context.messages);
+  let sourceMessages = withElidedOlderToolResults(contractedMessages);
+  const elidedToolResults = sourceMessages
+    .filter((message, index) => message !== contractedMessages[index]).length;
   const initialMessageCount = sourceMessages.length;
   let compiled = build(sourceMessages);
 
@@ -463,7 +484,21 @@ export function compileChatGptWebPrompt(
     const droppable = nextDroppableIndex(sourceMessages);
     if (droppable < 0) break;
     sourceMessages = [...sourceMessages.slice(0, droppable), ...sourceMessages.slice(droppable + 1)];
-    compiled = build(sourceMessages);
+    compiled = build(sourceMessages, initialMessageCount - sourceMessages.length);
+  }
+
+  const omittedMessages = initialMessageCount - sourceMessages.length;
+  if (omittedMessages > 0) {
+    appendDiagnosticRecord("context-trim.jsonl", {
+      mode: parsed._compactionRequest ? "compaction" : "turn",
+      initialMessages: initialMessageCount,
+      keptMessages: sourceMessages.length,
+      omittedMessages,
+      elidedToolResults,
+      promptChars: compiled.text.length,
+      promptJsonBytes: chatGptPromptJsonBytes(compiled.text),
+      composerCharLimit,
+    });
   }
 
   if (!parsed._compactionRequest) return compiled;
