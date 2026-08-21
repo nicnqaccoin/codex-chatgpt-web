@@ -380,10 +380,14 @@ export class TurnBroker {
       if (typeof token !== "string" || token.length === 0) throw new Error("turn token is required");
       const channel = this.channels.get(token);
       const retiredTurn = channel ? undefined : this.retiredTokens.get(token);
-      console.error(
-        `[chatgpt-web] broker claim received (tokenChars=${token.length}, valid=${Boolean(channel)}`
-        + `${channel ? "" : `, retiredTurn=${retiredTurn ?? "unknown"}`})`,
-      );
+      // A claim on a live channel is the ordinary start of a tool round trip and belongs on stdout
+      // beside the queued/delivered/completed lines. Logging every one of them to stderr put an
+      // error-coloured row in Runtime Activity for each successful turn. A claim that finds no
+      // channel really is a fault, and stays on stderr.
+      const claimLog = `[chatgpt-web] broker claim received (tokenChars=${token.length}, valid=${Boolean(channel)}`
+        + `${channel ? "" : `, retiredTurn=${retiredTurn ?? "unknown"}`})`;
+      if (channel) console.info(claimLog);
+      else console.error(claimLog);
       if (!channel) {
         throw new Error(retiredTurn !== undefined
           ? `This turn_token was issued for ${retiredTurnLabel(retiredTurn)}, which has already finished.`
