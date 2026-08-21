@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  CHATGPT_MAX_SINGLE_TOOL_RESULT_CHARS,
   pruneSemanticToolResults,
   compactToolResultsToReceipts,
   getLatestUserIndex,
@@ -314,6 +315,41 @@ test("compactToolResultsToReceipts converts remaining older bulky results to 1-l
 
   expect(resultText).toContain("[Tool 'custom_mcp_search' completed with 10,000 chars of output]");
   expect(resultText.length).toBeLessThan(100);
+});
+
+// A live session held a 138,893 character tool result. Left verbatim in the recent window it could
+// not fit any composer ceiling on its own, so fit recovery discarded the conversation around it and
+// the model received a single message.
+test("an oversized recent tool result is cut down instead of starving the conversation", () => {
+  const monster = "y".repeat(140_000);
+  const messages: CodexMessage[] = [
+    userMessage("Run the build", 1),
+    assistantToolCallMessage([{ id: "c1", name: "exec_command", args: { command: "bun run build" } }], 2),
+    toolResultMessage("c1", "exec_command", monster, 3),
+    userMessage("What failed?", 4),
+  ];
+
+  const compacted = compactToolResultsToReceipts(messages);
+  const resultText = compacted[2]!.content as string;
+
+  // Inside the verbatim window, so it keeps head and tail rather than collapsing to a receipt.
+  expect(resultText).not.toContain("completed with");
+  expect(resultText).toContain("characters elided");
+  expect(resultText.startsWith("yyy")).toBe(true);
+  expect(resultText.endsWith("yyy")).toBe(true);
+  expect(resultText.length).toBeLessThan(CHATGPT_MAX_SINGLE_TOOL_RESULT_CHARS);
+});
+
+test("a recent tool result under the single-result ceiling is left verbatim", () => {
+  const sizeable = "z".repeat(CHATGPT_MAX_SINGLE_TOOL_RESULT_CHARS - 1);
+  const messages: CodexMessage[] = [
+    userMessage("Run the build", 1),
+    assistantToolCallMessage([{ id: "c1", name: "exec_command", args: { command: "bun run build" } }], 2),
+    toolResultMessage("c1", "exec_command", sizeable, 3),
+    userMessage("What failed?", 4),
+  ];
+
+  expect(compactToolResultsToReceipts(messages)[2]!.content).toBe(sizeable);
 });
 
 test("path normalization handles Windows backslashes and case-insensitivity correctly", () => {

@@ -14,6 +14,7 @@
  *
  * Usage: bun run scripts/replay-context.ts [rollout.jsonl ...]
  *        bun run scripts/replay-context.ts --latest 3
+ *        bun run scripts/replay-context.ts --budget-tokens 90000 <rollout.jsonl>
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -145,18 +146,19 @@ function messageChars(message: CodexMessage): number {
 }
 
 /**
- * Codex hands the adapter its live context window, not the whole session, and compacts its own
- * history at this limit. Taking the newest slice that fits keeps the replay comparable to a real
- * turn instead of feeding the compiler a whole day of work.
+ * Codex hands the adapter its live context window, not the whole session. The default budget is the
+ * limit at which Codex compacts its own history, which is the typical pressure a turn arrives
+ * under; pass `--budget-tokens` with the reported context window instead to replay the worst case,
+ * the largest history Codex can still send before it must compact.
  */
-function liveContextSlice(messages: readonly CodexMessage[]): CodexMessage[] {
+function liveContextSlice(messages: readonly CodexMessage[], budgetTokens: number): CodexMessage[] {
   let start = messages.length;
   let tokens = 0;
   while (start > 0) {
     const message = messages[start - 1]!;
     const text = typeof message.content === "string" ? message.content : JSON.stringify(message.content);
     const cost = estimateTokens(text, CHATGPT_WEB_MODEL_ID);
-    if (tokens + cost > CHATGPT_WEB_MEDIUM_HIGH_AUTO_COMPACT_TOKEN_LIMIT) break;
+    if (tokens + cost > budgetTokens) break;
     tokens += cost;
     start -= 1;
   }
@@ -199,15 +201,24 @@ function latestRollouts(count: number): string[] {
 }
 
 const args = process.argv.slice(2);
-const files = args[0] === "--latest"
-  ? latestRollouts(Number(args[1] ?? 1))
-  : args.map(path => resolve(path));
+const budgetFlag = args.indexOf("--budget-tokens");
+const budgetTokens = budgetFlag >= 0
+  ? Number(args[budgetFlag + 1])
+  : CHATGPT_WEB_MEDIUM_HIGH_AUTO_COMPACT_TOKEN_LIMIT;
+if (!Number.isFinite(budgetTokens) || budgetTokens <= 0) {
+  throw new Error("--budget-tokens needs a positive number of tokens");
+}
+const positional = budgetFlag >= 0 ? args.filter((_value, index) => index !== budgetFlag && index !== budgetFlag + 1) : args;
+const files = positional[0] === "--latest"
+  ? latestRollouts(Number(positional[1] ?? 1))
+  : positional.map(path => resolve(path));
 if (files.length === 0) {
   throw new Error("Usage: bun run scripts/replay-context.ts [rollout.jsonl ...] | --latest <n>");
 }
 
+console.log(`context budget ${budgetTokens.toLocaleString("en-US")} tokens\n`);
 for (const file of files) {
-  const slice = liveContextSlice(messagesFromRollout(file));
+  const slice = liveContextSlice(messagesFromRollout(file), budgetTokens);
   if (slice.length === 0) {
     console.log(`${file}\n  no replayable messages`);
     continue;

@@ -12,6 +12,15 @@ const TOOL_RESULT_HEAD_CHARS = 4_000;
 const TOOL_RESULT_TAIL_CHARS = 2_000;
 
 /**
+ * A single tool result this large cannot be replayed whole under any composer ceiling - the Plus
+ * medium/high ceiling is 110,000 characters - so leaving one verbatim inside the recent window does
+ * not preserve it, it only makes fit recovery discard the entire conversation around it while still
+ * failing to fit. A real session held a 138,893 character result and collapsed to a single message.
+ * Only applied once the prompt has already exceeded its budget.
+ */
+export const CHATGPT_MAX_SINGLE_TOOL_RESULT_CHARS = 40_000;
+
+/**
  * Instruction blocks the task cannot work without: the desktop contract that carries the
  * Images/Visuals rules the Visualize plugin depends on, the environment and AGENTS.md contract, the
  * skill catalog, and per-plugin capability notes. Fit recovery drops ordinary conversation instead
@@ -328,7 +337,30 @@ function hasVisualizationDirectives(text: string): boolean {
   return /[\uE200\uE201\uE202]/.test(text);
 }
 
-const VISUALIZATION_PATH_PATTERN = /[^\s"'`,;]*[\\/]\.codex[\\/]visualizations[\\/][^\s"'`,;]+/gi;
+const VISUALIZATION_PATH_PATTERN = /[\\/]\.codex[\\/]visualizations[\\/][^\s"'`,;]+/gi;
+const PATH_BOUNDARY = /[\s"'`,;]/;
+
+/**
+ * Anchoring the scan on the literal segment keeps it linear. Leading the pattern with a
+ * `[^\s"'`,;]*` prefix instead made it backtrack from every offset, which took over twenty seconds
+ * on a 140,000 character result with no whitespace in it - and unbroken output that long is exactly
+ * what a build log or a minified bundle produces. The prefix is recovered by walking backwards.
+ */
+function visualizationPaths(text: string): string[] {
+  if (!/\.codex/i.test(text)) return [];
+  const paths: string[] = [];
+  VISUALIZATION_PATH_PATTERN.lastIndex = 0;
+  for (
+    let match = VISUALIZATION_PATH_PATTERN.exec(text);
+    match;
+    match = VISUALIZATION_PATH_PATTERN.exec(text)
+  ) {
+    let start = match.index;
+    while (start > 0 && !PATH_BOUNDARY.test(text[start - 1]!)) start -= 1;
+    paths.push(text.slice(start, match.index + match[0].length));
+  }
+  return [...new Set(paths)];
+}
 
 /**
  * The Visualize panel finds the artifact by scanning tool results for its
@@ -338,8 +370,7 @@ const VISUALIZATION_PATH_PATTERN = /[^\s"'`,;]*[\\/]\.codex[\\/]visualizations[\
  * rewrite dropped is restated at the end of the pruned text.
  */
 function withPreservedVisualizationPaths(original: string, pruned: string): string {
-  const missing = [...new Set(original.match(VISUALIZATION_PATH_PATTERN) ?? [])]
-    .filter(path => !pruned.includes(path));
+  const missing = visualizationPaths(original).filter(path => !pruned.includes(path));
   if (missing.length === 0) return pruned;
   return `${pruned}\n[visualization artifacts referenced above: ${missing.join(", ")}]`;
 }
@@ -644,12 +675,22 @@ export function compactToolResultsToReceipts(
 
   const compacted = messages.map((message, index) => {
     if (message.role !== "toolResult") return message;
-    if (index >= verbatimThreshold) return message;
 
     const text = textFromContent(message.content);
     if (hasVisualizationDirectives(text)) {
       return message;
     }
+
+    if (index >= verbatimThreshold) {
+      // The recent window stays verbatim, with one exception: an oversized result is not preserved
+      // by keeping it, only by keeping the head and tail that still fit.
+      if (text.length <= CHATGPT_MAX_SINGLE_TOOL_RESULT_CHARS) return message;
+      const elided = elideToolResultText(text);
+      return elided === text
+        ? message
+        : { ...message, content: updateContentText(message.content, elided) };
+    }
+
     if (text.length <= 150) return message;
 
     const charCount = text.length;
