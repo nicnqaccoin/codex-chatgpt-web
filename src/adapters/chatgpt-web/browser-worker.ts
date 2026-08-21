@@ -90,10 +90,22 @@ const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
  * ChatGPT applies composer state asynchronously, and a fast host can reach the next step before the
  * editor has taken the previous one. This is headroom for that, not a readiness check.
  */
-export const CHATGPT_UI_SETTLE_MS = 250;
+export const CHATGPT_UI_SETTLE_MS = 50;
 
 const settleChatGptUi = (): Promise<void> => (
   new Promise(resolveSettle => setTimeout(resolveSettle, CHATGPT_UI_SETTLE_MS))
+);
+
+/**
+ * The connector row is virtualized and keeps being replaced while the attachment menu's fill
+ * animation runs, so its geometry is only final once that animation settles. Composer headroom is
+ * not enough here: a bounding box read mid-animation is non-null but stale, and the trusted mouse
+ * click then lands on a sibling row.
+ */
+export const CHATGPT_MENU_ANIMATION_SETTLE_MS = 500;
+
+const settleChatGptMenuAnimation = (): Promise<void> => (
+  new Promise(resolveSettle => setTimeout(resolveSettle, CHATGPT_MENU_ANIMATION_SETTLE_MS))
 );
 
 class ChatGptConnectorCatalogStaleError extends Error {
@@ -1397,8 +1409,7 @@ export class ChatGptBrowserWorker {
     // Dispatch a trusted mouse input at the latest resolved row coordinates. Coordinate input
     // avoids Playwright waiting forever for this virtualized row to stop being replaced during the
     // menu's fill animation.
-    await settleChatGptUi();
-    await settleChatGptUi();
+    await settleChatGptMenuAnimation();
     let activationViewport = page.viewportSize();
     if (!activationViewport || activationViewport.width <= 0 || activationViewport.height <= 0) {
       activationViewport = await page.evaluate(() => ({
@@ -1417,7 +1428,7 @@ export class ChatGptBrowserWorker {
           return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
         }).catch(() => null);
       }
-      if (!connectorBox) await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
+      if (!connectorBox) await new Promise(resolveSleep => setTimeout(resolveSleep, 25));
     }
     if (!connectorBox || !activationViewport) {
       const rowCount = await appResult.count().catch(() => 0);
@@ -1586,7 +1597,7 @@ export class ChatGptBrowserWorker {
       throwIfPromptAttachmentAborted(abortSignal);
       if (observed === expected
         || normalizeComposerWhitespace(observed) === normalizeComposerWhitespace(expected)) return;
-      await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
+      await new Promise(resolveSleep => setTimeout(resolveSleep, 20));
     } while (Date.now() < deadline);
     throwIfPromptAttachmentAborted(abortSignal);
     throw promptAttachmentFailure(expected, observed, "chunk");
@@ -2132,6 +2143,9 @@ export class ChatGptBrowserWorker {
       let loggedCompletionWait = false;
       let capturedResponse = false;
       const sentAt = Date.now();
+      let lastActivityAt = sentAt;
+      let lastObservedVisibleText = "";
+      let lastObservedTraceCount = 0;
       const visibleTrace = new ChatGptVisibleTraceTracker();
       const markdownBuffer = new ChatGptMarkdownBuffer();
       const checkpointStream = turn.captureLunaCheckpoint
@@ -2171,6 +2185,8 @@ export class ChatGptBrowserWorker {
           CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS,
           () => diagnostics.capture(page, "tool-confirmation-visible"),
         )) {
+          lastActivityAt = Date.now();
+          loggedCompletionWait = false;
           await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
           continue;
         }
@@ -2178,13 +2194,30 @@ export class ChatGptBrowserWorker {
         const snapshot = await this.responseDomSnapshot(responseTurn);
         const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
         const running = await stop.isVisible().catch(() => false);
-        if (running) sawRunning = true;
+        if (running) {
+          sawRunning = true;
+          lastActivityAt = Date.now();
+        }
         if (snapshot.responsePresent) {
           if (!capturedResponse) {
             capturedResponse = true;
             await diagnostics.capture(page, "response-visible");
           }
+          if (snapshot.visibleText !== lastObservedVisibleText) {
+            lastObservedVisibleText = snapshot.visibleText;
+            lastActivityAt = Date.now();
+            loggedCompletionWait = false;
+          }
+          if (snapshot.traceBlocks.length !== lastObservedTraceCount) {
+            lastObservedTraceCount = snapshot.traceBlocks.length;
+            lastActivityAt = Date.now();
+            loggedCompletionWait = false;
+          }
           const textDelta = markdownBuffer.observe(snapshot.markdownSegments);
+          if (textDelta) {
+            lastActivityAt = Date.now();
+            loggedCompletionWait = false;
+          }
           for (const trace of visibleTrace.observe(snapshot.traceBlocks, snapshot.completionActionVisible)) {
             if (trace.kind === "commentary") turn.onCommentary?.(trace.text, trace.continuation === true);
             else turn.onReasoningSummary?.(trace.text, trace.continuation === true);
@@ -2223,7 +2256,7 @@ export class ChatGptBrowserWorker {
             }
             break;
           }
-          if (!loggedCompletionWait && Date.now() - sentAt >= 30_000) {
+          if (!loggedCompletionWait && Date.now() - lastActivityAt >= 30_000) {
             loggedCompletionWait = true;
             await diagnostics.capture(page, "response-stalled-30s");
             const diagnostic = await this.stalledTurnDiagnostic(page, responseTurn).catch(error => JSON.stringify({

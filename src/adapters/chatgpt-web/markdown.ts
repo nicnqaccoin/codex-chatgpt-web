@@ -121,7 +121,7 @@ export class ChatGptMarkdownBuffer {
 
   constructor(
     private readonly transform: (markdown: string) => string = markdown => markdown,
-    private readonly stabilityMs = 750,
+    private readonly stabilityMs = 250,
   ) {
     if (!Number.isFinite(stabilityMs) || stabilityMs < 0) {
       throw new Error("ChatGPT Markdown stability window must be a non-negative finite number");

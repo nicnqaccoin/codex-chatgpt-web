@@ -1,7 +1,17 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { randomBytes } = require("node:crypto");
-const { WebContentsView, shell } = require("electron");
+// Electron only exists in the packaged app and in the launcher's dev install. The browser-host unit
+// tests exercise pure BrowserHost logic under plain node, so a missing module is tolerated there -
+// but inside an Electron runtime a failed require is a real fault and must stay fatal.
+let electronModule = null;
+try {
+  electronModule = require("electron");
+} catch (error) {
+  if (process.versions.electron) throw error;
+}
+const WebContentsView = electronModule?.WebContentsView;
+const shell = electronModule?.shell;
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const {
   runBrowserHelperOperation,

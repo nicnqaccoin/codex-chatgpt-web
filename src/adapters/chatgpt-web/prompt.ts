@@ -8,6 +8,21 @@ import {
   CHATGPT_LUNA_CHECKPOINT_MARKER,
   CHATGPT_LUNA_CHECKPOINT_MAX_TOKENS,
 } from "./rolling-checkpoint";
+import {
+  CHATGPT_DEFAULT_VERBATIM_TOOL_RESULT_MESSAGES,
+  compactToolResultsToReceipts,
+  elideToolResultText,
+  isInstructionMessage,
+  pruneSemanticToolResults,
+  type SemanticPruneOptions,
+} from "./prune";
+
+export {
+  compactToolResultsToReceipts,
+  isInstructionMessage,
+  pruneSemanticToolResults,
+  type SemanticPruneOptions,
+};
 
 export interface ChatGptWebPromptImage {
   ref: string;
@@ -78,17 +93,7 @@ export function withoutDesktopOnlyReplayBlocks(text: string): string {
 }
 
 /** Tool results this recent stay verbatim; the task is usually still acting on them. */
-export const CHATGPT_VERBATIM_TOOL_RESULT_MESSAGES = 6;
-const TOOL_RESULT_HEAD_CHARS = 4_000;
-const TOOL_RESULT_TAIL_CHARS = 2_000;
-
-function elideToolResultText(text: string): string {
-  if (text.length <= TOOL_RESULT_HEAD_CHARS + TOOL_RESULT_TAIL_CHARS + 400) return text;
-  const elided = text.length - TOOL_RESULT_HEAD_CHARS - TOOL_RESULT_TAIL_CHARS;
-  return `${text.slice(0, TOOL_RESULT_HEAD_CHARS)}\n`
-    + `[... ${elided.toLocaleString("en-US")} characters elided from this older tool result ...]\n`
-    + text.slice(text.length - TOOL_RESULT_TAIL_CHARS);
-}
+export const CHATGPT_VERBATIM_TOOL_RESULT_MESSAGES = CHATGPT_DEFAULT_VERBATIM_TOOL_RESULT_MESSAGES;
 
 /**
  * A single Visualize apply_patch result was measured at 29,327 characters. Replaying every such
@@ -211,34 +216,6 @@ export function withoutSupersededModelSwitchContracts(messages: readonly CodexMe
     }
   }
   return messages.filter((_message, index) => !dropped.has(index));
-}
-
-/**
- * Instruction blocks the task cannot work without: the desktop contract that carries the
- * Images/Visuals rules the Visualize plugin depends on, the environment and AGENTS.md contract, the
- * skill catalog, and per-plugin capability notes. Fit recovery drops ordinary conversation instead
- * of these, whatever their position in the history.
- */
-const INSTRUCTION_BLOCK_MARKERS: readonly string[] = [
-  "<app-context>",
-  "<recommended_plugins>",
-  "<environment_context>",
-  "<skills_instructions>",
-  "<model_switch>",
-  "<permissions instructions>",
-  "<collaboration_mode>",
-  "<apps_instructions>",
-  "<plugins_instructions>",
-  "# AGENTS.md",
-  "Capabilities from the",
-];
-
-export function isInstructionMessage(message: CodexMessage): boolean {
-  if (message.role === "assistant" || message.role === "toolResult") return false;
-  const text = (typeof message.content === "string"
-    ? message.content
-    : message.content.map(part => part.type === "text" ? part.text : "").join("\n")).trimStart();
-  return INSTRUCTION_BLOCK_MARKERS.some(marker => text.startsWith(marker));
 }
 
 /**
@@ -453,7 +430,7 @@ export function compileChatGptWebPrompt(
   };
 
   const contractedMessages = withoutSupersededModelSwitchContracts(parsed.context.messages);
-  let sourceMessages = withElidedOlderToolResults(contractedMessages);
+  let sourceMessages = pruneSemanticToolResults(contractedMessages);
   const elidedToolResults = sourceMessages
     .filter((message, index) => message !== contractedMessages[index]).length;
   const initialMessageCount = sourceMessages.length;
@@ -473,6 +450,16 @@ export function compileChatGptWebPrompt(
       ? chatGptPromptJsonBytes(compiled.text) > CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET
       : composerCharLimit !== undefined && compiled.text.length > composerCharLimit
   );
+
+  // If initial semantic pruning still exceeds the budget, apply deep tool receipt compaction
+  // before discarding whole conversation turns.
+  if (exceedsBudget()) {
+    const deeplyCompacted = compactToolResultsToReceipts(sourceMessages);
+    if (deeplyCompacted.some((msg, idx) => msg !== sourceMessages[idx])) {
+      sourceMessages = deeplyCompacted;
+      compiled = build(sourceMessages);
+    }
+  }
 
   // Match native Codex compaction recovery: discard oldest history one item at a time until the
   // request fits, and rebuild image references after every trim so removed messages cannot leave
