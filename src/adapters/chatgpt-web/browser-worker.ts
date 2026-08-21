@@ -1614,7 +1614,10 @@ export class ChatGptBrowserWorker {
       throwIfPromptAttachmentAborted(abortSignal);
       if (observed === expected
         || normalizeComposerWhitespace(observed) === normalizeComposerWhitespace(expected)) return;
-      await new Promise(resolveSleep => setTimeout(resolveSleep, 20));
+      // Each probe clones the whole composer subtree, so at a six-figure prompt this poll is not
+      // free and it competes with the renderer that has to apply the next chunk. Polling it five
+      // times more often was assumed to finish sooner; it has never been measured to.
+      await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
     } while (Date.now() < deadline);
     throwIfPromptAttachmentAborted(abortSignal);
     throw promptAttachmentFailure(expected, observed, "chunk");

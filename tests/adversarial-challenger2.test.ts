@@ -105,8 +105,6 @@ describe("Adversarial Challenge 1: Visualization Sentinel Immunity", () => {
     const variants = [
       "\uE200visualize\uE202{\"path\":\"/tmp/viz.html\"}\uE201",
       "Prefix text \uE200visualize\uE202{\"path\":\"C:\\\\data\\\\viz.html\"}\uE201 suffix text",
-      "Path containing /.codex/visualizations/index.html without sentinels",
-      "Path containing C:\\Users\\app\\.codex\\visualizations\\chart.html with Windows backslashes",
       "Individual sentinel character \uE200 alone",
       "Individual sentinel character \uE201 alone",
       "Individual sentinel character \uE202 alone",
@@ -131,6 +129,36 @@ describe("Adversarial Challenge 1: Visualization Sentinel Immunity", () => {
       expect(text).toContain(variant);
       expect(text).not.toContain("superseded");
       expect(text.length).toBeGreaterThan(8000);
+    }
+  });
+
+  // A result that only mentions a visualization path carries no structured payload, so protecting
+  // all 8,000 characters of it was pure cost - on a real visualization session almost every tool
+  // result mentions that path. It may be pruned, as long as artifact detection can still find the
+  // path afterwards.
+  test("Visualization paths without sentinels survive pruning without protecting the whole result", () => {
+    const paths = [
+      "/.codex/visualizations/index.html",
+      "C:\\Users\\app\\.codex\\visualizations\\chart.html",
+    ];
+
+    for (const path of paths) {
+      const messages: CodexMessage[] = [
+        userMsg("Turn 1", 1),
+        asstMsg([{ type: "toolCall", id: "c1", name: "view_file", arguments: { path: "file.txt" } }], 2),
+        toolMsg("c1", "view_file", `Wrote ${path}\n${"Z".repeat(8000)}`, false, 3),
+        userMsg("Turn 2", 4),
+        asstMsg([{ type: "toolCall", id: "c2", name: "view_file", arguments: { path: "file.txt" } }], 5),
+        toolMsg("c2", "view_file", "newer content", false, 6),
+        userMsg("Turn 3 active", 7),
+      ];
+
+      const pruned = pruneSemanticToolResults(messages, { verbatimTailMessages: 1 });
+      const text = textFromContent(pruned[2]!.content as string | CodexContentPart[]);
+
+      expect(text).toContain(path);
+      expect(text).toContain("superseded");
+      expect(text.length).toBeLessThan(8000);
     }
   });
 
