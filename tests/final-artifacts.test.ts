@@ -66,6 +66,56 @@ test("does not duplicate an existing Visualize reference", () => {
   });
 });
 
+test("recovers a new sibling visualization created by a plain-language follow-up", () => {
+  const request = visualizeRequest();
+  const previousPath = visualizationPath;
+  const improvedPath = "C:\\Users\\person\\.codex\\visualizations\\2026\\08\\21\\thread-id\\newton-second-law-lab.html";
+  request.context.messages = [
+    request.context.messages[0]!,
+    {
+      role: "assistant",
+      content: [{ type: "text", text: `Original lesson.\n\nvisualize${JSON.stringify({ path: previousPath })}` }],
+      timestamp: 2,
+    },
+    { role: "user", content: "Make it prettier", timestamp: 3 },
+    {
+      role: "toolResult",
+      toolCallId: "call_improve",
+      toolName: "apply_patch",
+      content: `Success. Updated the following files:\nA ${improvedPath}\n`,
+      isError: false,
+      timestamp: 4,
+    },
+  ];
+
+  expect(requiredVisualizationReference(request)).toBe(
+    `visualize${JSON.stringify({ path: improvedPath })}`,
+  );
+});
+
+test("does not inherit Visualize scope for an unrelated HTML directory", () => {
+  const request = visualizeRequest();
+  request.context.messages = [
+    request.context.messages[0]!,
+    {
+      role: "assistant",
+      content: [{ type: "text", text: `visualize${JSON.stringify({ path: visualizationPath })}` }],
+      timestamp: 2,
+    },
+    { role: "user", content: "Now update the project landing page", timestamp: 3 },
+    {
+      role: "toolResult",
+      toolCallId: "call_unrelated",
+      toolName: "apply_patch",
+      content: "Success. Updated the following files:\nM D:\\project\\index.html\n",
+      isError: false,
+      timestamp: 4,
+    },
+  ];
+
+  expect(requiredVisualizationReference(request)).toBeUndefined();
+});
+
 test("does not infer artifacts from stale turns, errors, or unrelated HTML", () => {
   const stale = visualizeRequest();
   stale.context.messages.push({ role: "user", content: "Explain the result", timestamp: 3 });

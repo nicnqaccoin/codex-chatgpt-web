@@ -1469,7 +1469,7 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   });
 
-  test("restores a missing Visualize reference after the browser finishes its tool loop", async () => {
+  test("restores a missing Visualize reference for a plain-language follow-up tool loop", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-visualize-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
       adapter: "chatgpt-web",
@@ -1498,11 +1498,23 @@ describe("ChatGPT outer-native harness v4", () => {
       }
     };
 
-    const visualizationPath = "C:\\Users\\person\\.codex\\visualizations\\2026\\08\\21\\thread-id\\lesson.html";
+    const previousVisualizationPath = "C:\\Users\\person\\.codex\\visualizations\\2026\\08\\21\\thread-id\\lesson.html";
+    const visualizationPath = "C:\\Users\\person\\.codex\\visualizations\\2026\\08\\21\\thread-id\\lesson-lab.html";
     const reference = `visualize${JSON.stringify({ path: visualizationPath })}`;
     const adapter = createChatGptWebAdapter(provider);
     const initial = rawWireRequest(environmentXml);
-    initial.context.messages.at(-1)!.content = "[@Visualize](plugin://visualize@openai-bundled) create a lesson";
+    initial.context.messages = [
+      { role: "user", content: "[@Visualize](plugin://visualize@openai-bundled) create a lesson", timestamp: 1 },
+      {
+        role: "assistant",
+        content: [{
+          type: "text",
+          text: `Original lesson.\n\nvisualize${JSON.stringify({ path: previousVisualizationPath })}`,
+        }],
+        timestamp: 2,
+      },
+      { role: "user", content: "Make it prettier", timestamp: 3 },
+    ];
     const firstEvents: AdapterEvent[] = [];
     try {
       await adapter.runTurn!(initial, { headers: new Headers() }, event => firstEvents.push(event));
@@ -1512,7 +1524,7 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(call?.name).toBe("apply_patch");
 
       const continuation = structuredClone(initial);
-      const resultText = `Exit code: 0\nOutput:\nSuccess. Updated the following files:\nM ${visualizationPath}\n`;
+      const resultText = `Exit code: 0\nOutput:\nSuccess. Updated the following files:\nA ${visualizationPath}\n`;
       continuation.context.messages.push(
         {
           role: "assistant",
