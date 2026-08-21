@@ -90,15 +90,17 @@ describe("Adversarial Challenge 1: Visualization Sentinel Immunity", () => {
     const turn1Result = pruned[2]!;
     const turn1Text = textFromContent(turn1Result.content as string | CodexContentPart[]);
 
-    // It MUST NOT be replaced with a supersession receipt, despite being re-read in Turn 2
+    // It MUST NOT be replaced with a supersession receipt, despite being re-read in Turn 2, and the
+    // directive itself must survive byte for byte. The prose it was printed in may be elided: whole
+    // result immunity was measured protecting 508,716 characters of which 10,044 were inside a
+    // sentinel region, all of it one skill documentation dump replayed on every turn.
     expect(turn1Text).not.toContain("superseded by subsequent read");
     expect(turn1Text).toContain(sentinelStr);
-    expect(turn1Text).toBe(toolContentWithSentinel); // Exact byte-for-byte equality
 
     // 2. Deep receipt compaction
     const compacted = compactToolResultsToReceipts(pruned, 2);
     const compactedTurn1 = compacted[2]!;
-    expect(textFromContent(compactedTurn1.content as string | CodexContentPart[])).toBe(toolContentWithSentinel);
+    expect(textFromContent(compactedTurn1.content as string | CodexContentPart[])).toContain(sentinelStr);
   });
 
   test("Sentinels with various unicode escapes and partial directives are protected", () => {
@@ -125,10 +127,16 @@ describe("Adversarial Challenge 1: Visualization Sentinel Immunity", () => {
       const toolResultMessage = pruned[2]!;
       const text = textFromContent(toolResultMessage.content as string | CodexContentPart[]);
 
-      // Must be completely preserved because hasVisualizationDirectives is true
-      expect(text).toContain(variant);
+      // The sentinel-delimited directive survives byte for byte and is never turned into a receipt.
+      // The prose around it - here 8,000 characters of padding - is not part of the directive.
+      const sentinels = /[\uE200\uE201\uE202]/g;
+      const positions = [...variant.matchAll(sentinels)].map(match => match.index!);
+      const directive = variant.slice(positions[0]!, positions.at(-1)! + 1);
+
+      expect(text).toContain(directive);
       expect(text).not.toContain("superseded");
-      expect(text.length).toBeGreaterThan(8000);
+      expect(text.length).toBeLessThan(8000);
+      expect(text).toContain("elided from around this visualization directive");
     }
   });
 

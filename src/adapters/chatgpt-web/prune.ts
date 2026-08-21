@@ -342,6 +342,41 @@ function hasVisualizationDirectives(text: string): boolean {
   return /[\uE200\uE201\uE202]/.test(text);
 }
 
+/**
+ * Whole-result immunity was protecting the wrong thing. A tool result that merely prints the
+ * visualize skill's own documentation carries the sentinels in its examples, and a snapshot of real
+ * turns found 508,716 characters granted immunity of which 10,044 - two percent - were actually
+ * inside a sentinel region; all 18 of them were the same 28,262 character documentation dump,
+ * replayed in every turn against a 110,000 character ceiling.
+ *
+ * What has to survive intact is the directive itself, so keep the span that contains every sentinel
+ * and elide the prose around it.
+ */
+const SENTINEL_SURROUND_HEAD_CHARS = 400;
+const SENTINEL_SURROUND_TAIL_CHARS = 200;
+
+function lastSentinelIndex(text: string): number {
+  for (let index = text.length - 1; index >= 0; index -= 1) {
+    const code = text.charCodeAt(index);
+    if (code === 0xE200 || code === 0xE201 || code === 0xE202) return index;
+  }
+  return -1;
+}
+
+function elideAroundVisualizationSentinels(text: string): string {
+  const first = text.search(/[\uE200\uE201\uE202]/);
+  const last = lastSentinelIndex(text);
+  if (first < 0 || last < first) return text;
+
+  const head = text.slice(0, Math.min(first, SENTINEL_SURROUND_HEAD_CHARS));
+  const span = text.slice(first, last + 1);
+  const tailStart = Math.max(last + 1, text.length - SENTINEL_SURROUND_TAIL_CHARS);
+  const tail = text.slice(tailStart);
+  const removed = text.length - head.length - span.length - tail.length;
+  if (removed <= 0) return text;
+  return `${head}\n[... ${removed.toLocaleString("en-US")} characters elided from around this visualization directive ...]\n${span}${tail}`;
+}
+
 const VISUALIZATION_PATH_PATTERN = /[\\/]\.codex[\\/]visualizations[\\/][^\s"'`,;]+/gi;
 const PATH_BOUNDARY = /[\s"'`,;]/;
 
@@ -549,6 +584,11 @@ export function pruneSemanticToolResults(
 
     const text = textFromContent(msg.content);
     if (hasVisualizationDirectives(text)) {
+      // The recent window keeps the live directive and everything around it untouched. Older ones
+      // keep the directive and lose the prose it was printed in.
+      if (isProtected(i)) continue;
+      const trimmed = elideAroundVisualizationSentinels(text);
+      if (trimmed !== text) result[i] = { ...msg, content: updateContentText(msg.content, trimmed) };
       continue;
     }
 
