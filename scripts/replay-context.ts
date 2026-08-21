@@ -44,6 +44,7 @@ interface RolloutItem {
   name?: string;
   call_id?: string;
   arguments?: unknown;
+  input?: unknown;
   output?: unknown;
 }
 
@@ -105,12 +106,19 @@ function messagesFromRollout(file: string): CodexMessage[] {
         const name = item.name ?? "";
         const callId = item.call_id ?? "";
         callNames.set(callId, name);
+        // A custom tool call carries its payload in `input`, not `arguments`, and the parser wraps
+        // it as `{ input }` (src/responses/parser.ts). Reading `arguments` for both shapes silently
+        // dropped every apply_patch body - 2,980 characters each - out of the replay.
         let args: Record<string, unknown> = {};
-        try {
-          const parsed = typeof item.arguments === "string" ? JSON.parse(item.arguments) : item.arguments;
-          if (parsed && typeof parsed === "object") args = parsed as Record<string, unknown>;
-        } catch {
-          // A tool that sent non-JSON arguments still contributes its result to the history.
+        if (item.type === "custom_tool_call") {
+          args = { input: typeof item.input === "string" ? item.input : "" };
+        } else {
+          try {
+            const parsed = typeof item.arguments === "string" ? JSON.parse(item.arguments) : item.arguments;
+            if (parsed && typeof parsed === "object") args = parsed as Record<string, unknown>;
+          } catch {
+            // A tool that sent non-JSON arguments still contributes its result to the history.
+          }
         }
         messages.push({
           role: "assistant",

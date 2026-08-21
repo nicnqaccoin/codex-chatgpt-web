@@ -352,6 +352,45 @@ test("a recent tool result under the single-result ceiling is left verbatim", ()
   expect(compactToolResultsToReceipts(messages)[2]!.content).toBe(sizeable);
 });
 
+// A tool call replays its own arguments forever, and an apply_patch carries a whole diff in them.
+// Results were elided from the start; the calls that produced them were not, which cost 7 messages
+// of retained history on a replayed 247-message session.
+test("an older tool call's oversized arguments are elided, keeping the call identifiable", () => {
+  const patch = `*** Begin Patch\n*** Update File: src/app.ts\n${"+ line of the diff\n".repeat(400)}*** End Patch`;
+  const messages: CodexMessage[] = [
+    userMessage("Apply the change", 1),
+    assistantToolCallMessage([{ id: "c1", name: "apply_patch", args: { input: patch } }], 2),
+    toolResultMessage("c1", "apply_patch", "Applied", 3),
+    userMessage("Turn 2", 4),
+    userMessage("Turn 3", 5),
+    userMessage("Turn 4", 6),
+    userMessage("Turn 5", 7),
+    userMessage("Turn 6", 8),
+    userMessage("Turn 7 active", 9),
+  ];
+
+  const pruned = pruneSemanticToolResults(messages);
+  const call = (pruned[1]!.content as Array<{ type: string; arguments?: Record<string, unknown> }>)[0]!;
+  const input = String(call.arguments!.input);
+
+  expect(input.length).toBeLessThan(patch.length);
+  expect(input).toContain("*** Update File: src/app.ts");
+  expect(input).toContain("characters elided from this earlier tool call");
+  expect(input).toContain("*** End Patch");
+});
+
+test("a recent tool call keeps its arguments verbatim", () => {
+  const patch = `*** Begin Patch\n${"+ line\n".repeat(400)}*** End Patch`;
+  const messages: CodexMessage[] = [
+    userMessage("Apply the change", 1),
+    assistantToolCallMessage([{ id: "c1", name: "apply_patch", args: { input: patch } }], 2),
+    toolResultMessage("c1", "apply_patch", "Applied", 3),
+  ];
+
+  const call = (pruneSemanticToolResults(messages)[1]!.content as Array<{ arguments?: Record<string, unknown> }>)[0]!;
+  expect(call.arguments!.input).toBe(patch);
+});
+
 test("path normalization handles Windows backslashes and case-insensitivity correctly", () => {
   const fileContent = "export const config = { enabled: true };\n".repeat(40);
   const messages: CodexMessage[] = [

@@ -380,6 +380,55 @@ function withPreservedVisualizationPaths(original: string, pruned: string): stri
   return `${pruned}\n[visualization artifacts referenced above: ${missing.join(", ")}]`;
 }
 
+/**
+ * A tool call replays its own arguments on every later turn, and `apply_patch` carries a whole diff
+ * in them: measured at 2,980 characters per call, with 7,494 characters per request sitting outside
+ * the recent window - 7.6% of a prompt that runs at 99,000 of a 110,000 ceiling. Tool results were
+ * already elided this way from the start; the calls that produced them never were.
+ *
+ * The head is generous relative to the tail because it is what identifies the call: an apply_patch
+ * input opens with `*** Begin Patch *** Add File: <path>`, so the file being changed survives.
+ */
+const TOOL_CALL_ARGUMENT_LIMIT_CHARS = 600;
+const TOOL_CALL_ARGUMENT_HEAD_CHARS = 400;
+const TOOL_CALL_ARGUMENT_TAIL_CHARS = 120;
+
+function elideToolCallArgument(value: string): string {
+  if (value.length <= TOOL_CALL_ARGUMENT_LIMIT_CHARS) return value;
+  if (hasVisualizationDirectives(value)) return value;
+  const elided = value.length - TOOL_CALL_ARGUMENT_HEAD_CHARS - TOOL_CALL_ARGUMENT_TAIL_CHARS;
+  return `${value.slice(0, TOOL_CALL_ARGUMENT_HEAD_CHARS)}\n`
+    + `[... ${elided.toLocaleString("en-US")} characters elided from this earlier tool call ...]\n`
+    + value.slice(value.length - TOOL_CALL_ARGUMENT_TAIL_CHARS);
+}
+
+/** Shorten the arguments of tool calls the task has already moved past, in place. */
+function elideOlderToolCallArguments(result: CodexMessage[], verbatimThreshold: number): void {
+  for (let index = 0; index < verbatimThreshold; index += 1) {
+    const message = result[index];
+    if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
+    let messageChanged = false;
+    const content = message.content.map(part => {
+      if (part.type !== "toolCall") return part;
+      let partChanged = false;
+      const args: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(part.arguments ?? {})) {
+        if (typeof value !== "string") {
+          args[key] = value;
+          continue;
+        }
+        const shortened = elideToolCallArgument(value);
+        if (shortened !== value) partChanged = true;
+        args[key] = shortened;
+      }
+      if (!partChanged) return part;
+      messageChanged = true;
+      return { ...part, arguments: args };
+    });
+    if (messageChanged) result[index] = { ...message, content };
+  }
+}
+
 /** Re-state any visualization path a rewrite dropped, for every result the caller changed. */
 function restoreVisualizationPaths(
   before: readonly CodexMessage[],
@@ -665,6 +714,7 @@ export function pruneSemanticToolResults(
     }
   }
 
+  elideOlderToolCallArguments(result, verbatimThreshold);
   return restoreVisualizationPaths(messages, result);
 }
 
