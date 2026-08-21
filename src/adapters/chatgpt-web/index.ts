@@ -6,6 +6,7 @@ import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
+import { appendDiagnosticRecord } from "./diagnostics-log";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./environment";
 import { repairMissingFinalArtifactReference } from "./final-artifacts";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
@@ -520,6 +521,19 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
           }
         });
       } catch (error) {
+        // A failed turn only left a diagnostics directory that later turns rotate away, so after the
+        // fact there was no way to say what actually breaks - the question could not be answered
+        // even once. An unclassified failure is the expensive kind: it is rethrown rather than
+        // reported, and the client answers by replaying the whole turn.
+        appendDiagnosticRecord("turn-failures.jsonl", {
+          traceId,
+          mode: session.runtime.mode,
+          classified: error instanceof ChatGptWebAdapterError,
+          retryable: error instanceof ChatGptWebAdapterError ? error.retryable : false,
+          code: error instanceof ChatGptWebAdapterError ? error.code : "unclassified",
+          name: error instanceof Error ? error.name : typeof error,
+          message: (error instanceof Error ? error.message : String(error)).slice(0, 400),
+        });
         const handledError = error instanceof ChatGptWebAdapterError && error.retryable
           ? chatGptWebTurnRetryPolicy.recordRetryableFailure(retryKey, error)
           : error;
