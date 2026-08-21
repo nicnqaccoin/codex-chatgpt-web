@@ -84,6 +84,14 @@ export const CHATGPT_EMPTY_RESPONSE_GRACE_MS = 10_000;
 export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
 export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
 export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
+/**
+ * No turn deadline is configured by default, so a browser turn that stops producing anything waits
+ * forever and only the user can end it - one sat for ten minutes today with nothing to stop it.
+ * This is an idle bound, not a total one: a turn that is still emitting text, trace blocks or tool
+ * cards keeps its budget no matter how long it runs, and real turns here run four to fifteen
+ * minutes. It is raised as a retryable failure so the client reissues the turn on its own.
+ */
+export const CHATGPT_TURN_INACTIVITY_TIMEOUT_MS = 10 * 60_000;
 const CHATGPT_SMOKE_TEXT = "Reply with exactly: CODEX WEB GPT READY";
 const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
 /**
@@ -2188,6 +2196,14 @@ export class ChatGptBrowserWorker {
         }
         if (deadline !== undefined && Date.now() >= deadline) {
           throw new Error("ChatGPT web turn timed out");
+        }
+        if (Date.now() - lastActivityAt >= CHATGPT_TURN_INACTIVITY_TIMEOUT_MS) {
+          await diagnostics.capture(page, "turn-inactive");
+          throw new ChatGptWebAdapterError(
+            `ChatGPT produced nothing for ${Math.round(CHATGPT_TURN_INACTIVITY_TIMEOUT_MS / 60_000)} minutes.`
+            + " The browser turn was abandoned so it can be retried instead of waiting indefinitely.",
+            { status: 504, errorType: "server_error", code: "chatgpt_turn_inactive", retryable: true },
+          );
         }
         if (Date.now() - lastHeartbeat >= 10_000) {
           turn.onHeartbeat?.();
