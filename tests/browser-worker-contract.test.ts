@@ -8,12 +8,6 @@ import { CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnector
 import { parseChatGptEffortSliderState } from "../src/chatgpt-session";
 import type { CodexParsedRequest } from "../src/types";
 
-/**
- * `insertPromptText` takes the composer already resolved by its caller and only forwards it to the
- * chunk wait and the caret re-anchor, both of which these tests stub out.
- */
-const insertComposer = { focus: async () => {} };
-
 test("browser turn orchestration retains owned prompt insertion and semantic submission", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
   const runBrowserTurn = workerSource.slice(workerSource.indexOf("  private async runBrowserTurn("));
@@ -197,7 +191,7 @@ test("large read-only context is inserted as contiguous bounded edits before exa
     attachPrompt(page: unknown, prompt: string, localTools: boolean): Promise<void>;
   }).attachPrompt;
   const insertPromptText = (ChatGptBrowserWorker.prototype as unknown as {
-    insertPromptText(page: unknown, composer: unknown, text: string): Promise<void>;
+    insertPromptText(page: unknown, text: string): Promise<void>;
   }).insertPromptText;
 
   await attachPrompt.call({
@@ -243,7 +237,7 @@ test("multi-chunk prompt insertion repairs a drifted Lexical caret after each ex
     },
   };
   const insertPromptText = (ChatGptBrowserWorker.prototype as unknown as {
-    insertPromptText(page: unknown, composer: unknown, text: string): Promise<void>;
+    insertPromptText(page: unknown, text: string): Promise<void>;
   }).insertPromptText;
 
   await insertPromptText.call({
@@ -256,7 +250,7 @@ test("multi-chunk prompt insertion repairs a drifted Lexical caret after each ex
       caret = attached.length;
       calls.push(["reanchor"]);
     },
-  }, page, insertComposer, prompt);
+  }, page, prompt);
 
   expect(attached).toBe(prompt);
   expect(calls).toEqual([
@@ -287,7 +281,7 @@ test("prompt insertion never sends the six-figure native edit that rewrites the 
     },
   };
   const insertPromptText = (ChatGptBrowserWorker.prototype as unknown as {
-    insertPromptText(page: unknown, composer: unknown, text: string): Promise<void>;
+    insertPromptText(page: unknown, text: string): Promise<void>;
   }).insertPromptText;
 
   await insertPromptText.call({
@@ -295,7 +289,7 @@ test("prompt insertion never sends the six-figure native edit that rewrites the 
       expect(attached).toBe(expected);
     },
     reanchorPromptCaret: async () => { caret = attached.length; },
-  }, page, insertComposer, prompt);
+  }, page, prompt);
 
   expect(nativeEditSizes.length).toBeGreaterThan(1);
   expect(Math.max(...nativeEditSizes)).toBe(CHATGPT_PROMPT_INSERT_CHUNK_CHARS);
@@ -337,7 +331,7 @@ test("the real compaction envelope survives simulated caret drift at every bound
     },
   };
   const insertPromptText = (ChatGptBrowserWorker.prototype as unknown as {
-    insertPromptText(page: unknown, composer: unknown, text: string): Promise<void>;
+    insertPromptText(page: unknown, text: string): Promise<void>;
   }).insertPromptText;
 
   await insertPromptText.call({
@@ -347,7 +341,7 @@ test("the real compaction envelope survives simulated caret drift at every bound
       simulatedDrifts += 1;
     },
     reanchorPromptCaret: async () => { caret = attached.length; },
-  }, page, insertComposer, compiled.text);
+  }, page, compiled.text);
 
   expect(simulatedDrifts).toBe(Math.floor((compiled.text.length - 1) / CHATGPT_PROMPT_INSERT_CHUNK_CHARS));
   expect(attached).toBe(compiled.text);
@@ -362,13 +356,13 @@ test("prompt chunks never split a UTF-16 surrogate pair", async () => {
     },
   };
   const insertPromptText = (ChatGptBrowserWorker.prototype as unknown as {
-    insertPromptText(page: unknown, composer: unknown, text: string): Promise<void>;
+    insertPromptText(page: unknown, text: string): Promise<void>;
   }).insertPromptText;
 
   await insertPromptText.call({
     waitForPromptChunkAttached: async () => {},
     reanchorPromptCaret: async () => {},
-  }, page, insertComposer, prompt);
+  }, page, prompt);
 
   expect(inserted.join("")).toBe(prompt);
   expect(inserted[0]?.length).toBe(CHATGPT_PROMPT_INSERT_CHUNK_CHARS - 1);
@@ -387,20 +381,20 @@ test("prompt insertion stops after its stage is aborted before another native ed
     },
   };
   const insertPromptText = (ChatGptBrowserWorker.prototype as unknown as {
-    insertPromptText(page: unknown, composer: unknown, text: string, abortSignal?: AbortSignal): Promise<void>;
+    insertPromptText(page: unknown, text: string, abortSignal?: AbortSignal): Promise<void>;
   }).insertPromptText;
 
   await expect(insertPromptText.call({
     waitForPromptChunkAttached: async () => {},
     reanchorPromptCaret: async () => {},
-  }, page, insertComposer, "x".repeat(CHATGPT_PROMPT_INSERT_CHUNK_CHARS * 2 + 1), controller.signal))
+  }, page, "x".repeat(CHATGPT_PROMPT_INSERT_CHUNK_CHARS * 2 + 1), controller.signal))
     .rejects.toThrow("aborted");
   expect(inserted).toHaveLength(1);
 });
 
 test("caret re-anchor fails closed when the live composer cannot be anchored", async () => {
   const reanchorPromptCaret = (ChatGptBrowserWorker.prototype as unknown as {
-    reanchorPromptCaret(composer: unknown): Promise<void>;
+    reanchorPromptCaret(page: unknown): Promise<void>;
   }).reanchorPromptCaret;
   let evaluateOptions: unknown;
   const composer = {
@@ -411,8 +405,9 @@ test("caret re-anchor fails closed when the live composer cannot be anchored", a
     },
   };
 
-  await expect(reanchorPromptCaret.call({}, composer))
-    .rejects.toThrow("could not re-anchor the prompt caret");
+  await expect(reanchorPromptCaret.call({
+    activeComposer: async () => composer,
+  }, {})).rejects.toThrow("could not re-anchor the prompt caret");
   expect(evaluateOptions).toEqual({ timeout: 20_000 });
 
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
@@ -762,7 +757,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
     selectConnector(page: unknown): Promise<unknown>;
   }).selectConnector;
   const insertPromptText = (ChatGptBrowserWorker.prototype as unknown as {
-    insertPromptText(page: unknown, composer: unknown, text: string): Promise<void>;
+    insertPromptText(page: unknown, text: string): Promise<void>;
   }).insertPromptText;
 
   let activeComposerCalls = 0;

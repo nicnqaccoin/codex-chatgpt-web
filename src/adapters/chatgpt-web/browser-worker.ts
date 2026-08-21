@@ -1276,34 +1276,23 @@ export class ChatGptBrowserWorker {
     }
   }
 
-  /**
-   * Takes the resolved composer rather than the page: this runs inside two polling loops while a
-   * six-figure prompt is being inserted, and re-resolving the composer there charged an extra round
-   * trip per probe for a locator that cannot have changed mid-insert.
-   */
-  private async attachedPromptText(composer: Locator): Promise<string> {
+  private async attachedPromptText(page: Page): Promise<string> {
+    const composer = await this.activeComposer(page);
     return composer.evaluate(element => {
-      // Cloning the whole editor to delete a few pills allocated a copy of the entire Lexical tree
-      // on every probe. Walking it and skipping the pill subtrees in place yields the same text.
-      const ignoredSelector = '[data-id^="plugin:"][data-keyword], [data-inline-selection-pill-cursor-target]';
-      const visibleText = (node: Node): string => {
-        if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? "";
-        if (!(node instanceof Element)) return "";
-        if (node.matches(ignoredSelector)) return "";
-        let text = "";
-        for (const child of node.childNodes) text += visibleText(child);
-        return text;
-      };
-      return [...element.childNodes]
-        .filter(child => !(child instanceof Element && child.matches(ignoredSelector)))
-        .map(child => visibleText(child))
+      const clone = element.cloneNode(true) as HTMLElement;
+      clone.querySelectorAll(
+        '[data-id^="plugin:"][data-keyword], [data-inline-selection-pill-cursor-target]',
+      )
+        .forEach(part => part.remove());
+      return [...clone.childNodes]
+        .map(child => child.textContent ?? "")
         .join("\n")
         .trimStart();
     }, undefined, { timeout: 20_000 });
   }
 
   private async assertPromptAttached(
-    composer: Locator,
+    page: Page,
     prompt: string,
     abortSignal?: AbortSignal,
   ): Promise<void> {
@@ -1311,12 +1300,11 @@ export class ChatGptBrowserWorker {
     let observed = "";
     while (Date.now() < deadline) {
       throwIfPromptAttachmentAborted(abortSignal);
-      observed = await this.attachedPromptText(composer);
+      observed = await this.attachedPromptText(page);
       throwIfPromptAttachmentAborted(abortSignal);
       if (observed === prompt
         || normalizeComposerWhitespace(observed) === normalizeComposerWhitespace(prompt)) return;
-      // Each probe reads back the complete prompt, so this poll is O(prompt) and cannot be cheap.
-      await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
+      await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
     }
     throwIfPromptAttachmentAborted(abortSignal);
     throw promptAttachmentFailure(prompt, observed, "complete");
@@ -1509,8 +1497,8 @@ export class ChatGptBrowserWorker {
       // then transport the complete text in one CDP Input.insertText command.
       await composer.fill("");
       await composer.focus();
-      await this.insertPromptText(page, composer, prompt, abortSignal);
-      await this.assertPromptAttached(composer, prompt, abortSignal);
+      await this.insertPromptText(page, prompt, abortSignal);
+      await this.assertPromptAttached(page, prompt, abortSignal);
       return;
     }
     const selectedComposer = await this.selectConnector(
@@ -1520,12 +1508,13 @@ export class ChatGptBrowserWorker {
     );
     await selectedComposer.focus();
     await page.keyboard.press(CHATGPT_COMPOSER_DOCUMENT_END_KEY);
-    await this.insertPromptText(page, selectedComposer, ` ${prompt}`, abortSignal);
-    await this.assertPromptAttached(selectedComposer, prompt, abortSignal);
+    await this.insertPromptText(page, ` ${prompt}`, abortSignal);
+    await this.assertPromptAttached(page, prompt, abortSignal);
   }
 
-  private async reanchorPromptCaret(composer: Locator, abortSignal?: AbortSignal): Promise<void> {
+  private async reanchorPromptCaret(page: Page, abortSignal?: AbortSignal): Promise<void> {
     throwIfPromptAttachmentAborted(abortSignal);
+    const composer = await this.activeComposer(page);
     await composer.focus();
     const anchored = await composer.evaluate(async element => {
       const ignoredSelector = '[data-id^="plugin:"][data-keyword], [data-inline-selection-pill-cursor-target]';
@@ -1595,12 +1584,7 @@ export class ChatGptBrowserWorker {
     }
   }
 
-  private async insertPromptText(
-    page: Page,
-    composer: Locator,
-    text: string,
-    abortSignal?: AbortSignal,
-  ): Promise<void> {
+  private async insertPromptText(page: Page, text: string, abortSignal?: AbortSignal): Promise<void> {
     for (let offset = 0; offset < text.length;) {
       throwIfPromptAttachmentAborted(abortSignal);
       const end = promptInsertChunkEnd(text, offset);
@@ -1610,15 +1594,15 @@ export class ChatGptBrowserWorker {
         // Lexical can rebuild the active block after an exact commit and move its native selection.
         // Re-anchor only after the verified prefix is stable, before the next irreversible edit.
         const expectedPrefix = text.slice(0, end).trimStart();
-        await this.waitForPromptChunkAttached(composer, expectedPrefix, abortSignal);
-        await this.reanchorPromptCaret(composer, abortSignal);
+        await this.waitForPromptChunkAttached(page, expectedPrefix, abortSignal);
+        await this.reanchorPromptCaret(page, abortSignal);
       }
       offset = end;
     }
   }
 
   private async waitForPromptChunkAttached(
-    composer: Locator,
+    page: Page,
     expected: string,
     abortSignal?: AbortSignal,
   ): Promise<void> {
@@ -1626,12 +1610,12 @@ export class ChatGptBrowserWorker {
     let observed = "";
     do {
       throwIfPromptAttachmentAborted(abortSignal);
-      observed = await this.attachedPromptText(composer);
+      observed = await this.attachedPromptText(page);
       throwIfPromptAttachmentAborted(abortSignal);
       if (observed === expected
         || normalizeComposerWhitespace(observed) === normalizeComposerWhitespace(expected)) return;
-      // Each probe reads back everything inserted so far, so this poll is not free at a six-figure
-      // prompt and it competes with the renderer that has to apply the next chunk. Polling it five
+      // Each probe clones the whole composer subtree, so at a six-figure prompt this poll is not
+      // free and it competes with the renderer that has to apply the next chunk. Polling it five
       // times more often was assumed to finish sooner; it has never been measured to.
       await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
     } while (Date.now() < deadline);
