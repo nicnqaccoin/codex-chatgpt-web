@@ -1,4 +1,6 @@
 import type { CodexMessage, CodexParsedRequest } from "../../types";
+import { isInstructionMessage } from "./prompt";
+import { recordArtifactDetectionMiss } from "./artifact-diagnostics";
 
 const VISUALIZE_PLUGIN = /plugin:\/\/visualize@openai-bundled/i;
 const VISUALIZE_REFERENCE = /visualize(\{[^\r\n]*\})/g;
@@ -18,7 +20,17 @@ function textContent(content: CodexMessage["content"]): string {
   return text.join("\n");
 }
 
+/**
+ * Codex carries its own contracts as user messages - the environment block, AGENTS.md, the plugin
+ * catalog - and places them wherever the request builder likes, including after the turn's tool
+ * results. Treating one of those as "the latest request" leaves nothing to scan, so the human ask is
+ * the last user message that is not an instruction block.
+ */
 function latestUserIndex(messages: readonly CodexMessage[]): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (message.role === "user" && !isInstructionMessage(message)) return index;
+  }
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (messages[index]!.role === "user") return index;
   }
@@ -100,7 +112,10 @@ export function requiredVisualizationReference(parsed: CodexParsedRequest): stri
   if (user.role !== "user") return undefined;
   const explicitInvocation = VISUALIZE_PLUGIN.test(textContent(user.content));
   const inheritedDirectories = priorVisualizationDirectories(messages, userIndex);
-  if (!explicitInvocation && inheritedDirectories.size === 0) return undefined;
+  if (!explicitInvocation && inheritedDirectories.size === 0) {
+    recordArtifactDetectionMiss(messages, userIndex);
+    return undefined;
+  }
 
   let visualizationPath: string | undefined;
   for (const message of messages.slice(userIndex + 1)) {
@@ -118,7 +133,10 @@ export function requiredVisualizationReference(parsed: CodexParsedRequest): stri
       ) visualizationPath = path;
     }
   }
-  if (!visualizationPath) return undefined;
+  if (!visualizationPath) {
+    recordArtifactDetectionMiss(messages, userIndex);
+    return undefined;
+  }
   return `visualize${JSON.stringify({ path: visualizationPath })}`;
 }
 
