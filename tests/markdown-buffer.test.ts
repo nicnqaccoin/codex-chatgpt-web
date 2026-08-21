@@ -51,6 +51,27 @@ describe("ChatGptMarkdownBuffer Responsiveness & Stability", () => {
     expect(buffer.observe(hydrated, t0 + 1400)).toBe("F\\_x");
   });
 
+  // ChatGPT rewrites finished blocks while it hydrates controls and citations. A rewrite that never
+  // reaches the Markdown cannot change what a commit emits, so it must not restart the wait.
+  test("a cosmetic HTML rewrite does not restart the stability window", () => {
+    const buffer = new ChatGptMarkdownBuffer(m => m, 750);
+    const t0 = 1000;
+    const tail: ChatGptMarkdownSegment = { key: "1", html: "<p>tail</p>", text: "tail", streamable: false };
+    const first: ChatGptMarkdownSegment[] = [
+      { key: "0", html: "<p>Settled paragraph</p>", text: "Settled paragraph", streamable: true },
+      tail,
+    ];
+    expect(buffer.observe(first, t0)).toBe("");
+
+    const reskinned: ChatGptMarkdownSegment[] = [
+      { key: "0", html: '<p class="mt-2 hydrated">Settled paragraph</p>', text: "Settled paragraph", streamable: true },
+      tail,
+    ];
+    expect(buffer.observe(reskinned, t0 + 700)).toBe("");
+    // Still committed on the original block's own deadline rather than 750ms after the reskin.
+    expect(buffer.observe(reskinned, t0 + 750)).toBe("Settled paragraph");
+  });
+
   test("handles list items within a group using single newline separators", () => {
     const buffer = new ChatGptMarkdownBuffer(m => m, 100);
 

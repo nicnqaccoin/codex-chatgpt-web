@@ -94,6 +94,8 @@ export interface ChatGptMarkdownSegment {
 }
 
 interface ChatGptMarkdownCandidate extends ChatGptMarkdownSegment {
+  /** The Markdown this block currently renders to, which is what a commit actually emits. */
+  rendered: string;
   changedAt: number;
   streamableAt?: number;
 }
@@ -135,13 +137,19 @@ export class ChatGptMarkdownBuffer {
     for (let index = this.committed.length; index < segments.length; index += 1) {
       const segment = segments[index]!;
       const previous = this.candidates.get(index);
+      // The window guards against emitting something ChatGPT is still going to change, so it has to
+      // be keyed on what a commit emits. Keying it on raw HTML restarted the wait for rewrites that
+      // never reach the Markdown - hydrating controls and class churn - while late hydration that
+      // does change the Markdown still restarts it, which is the case that matters.
+      const rendered = chatGptHtmlToMarkdown(segment.html);
       const unchanged = previous
         && previous.key === segment.key
-        && previous.html === segment.html
+        && previous.rendered === rendered
         && previous.text === segment.text
         && previous.group === segment.group;
       this.candidates.set(index, {
         ...segment,
+        rendered,
         changedAt: unchanged ? previous.changedAt : now,
         ...(segment.streamable ? {
           streamableAt: unchanged && previous.streamableAt !== undefined
@@ -160,7 +168,7 @@ export class ChatGptMarkdownBuffer {
       const candidate = this.candidates.get(index);
       if (!candidate?.streamable || candidate.streamableAt === undefined) break;
       if (now - Math.max(candidate.changedAt, candidate.streamableAt) < this.stabilityMs) break;
-      delta += this.commit(candidate);
+      delta += this.commit(candidate, candidate.rendered);
       this.committed.push({ key: candidate.key, text: candidate.text });
       this.candidates.delete(index);
     }
@@ -192,8 +200,8 @@ export class ChatGptMarkdownBuffer {
     }
   }
 
-  private commit(segment: ChatGptMarkdownSegment): string {
-    const block = this.transform(chatGptHtmlToMarkdown(segment.html));
+  private commit(segment: ChatGptMarkdownSegment, rendered?: string): string {
+    const block = this.transform(rendered ?? chatGptHtmlToMarkdown(segment.html));
     if (!block) return "";
     const separator = this.markdown
       ? segment.group !== undefined && segment.group === this.lastGroup ? "\n" : "\n\n"
