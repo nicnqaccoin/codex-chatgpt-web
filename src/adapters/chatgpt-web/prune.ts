@@ -27,6 +27,11 @@ export const CHATGPT_MAX_SINGLE_TOOL_RESULT_CHARS = 40_000;
  * of these, whatever their position in the history.
  */
 const INSTRUCTION_BLOCK_MARKERS: readonly string[] = [
+  // Codex's own operating contract, and the only one that carries no block marker of its own, which
+  // is why it was droppable: it also sits second in the item order, so it was the first thing fit
+  // recovery discarded. Replaying 94 real requests found it dropped from 26 of them while the
+  // 32,399 character <app-context> block beside it was kept every time.
+  "You are Codex, an agent",
   "<app-context>",
   "<recommended_plugins>",
   "<environment_context>",

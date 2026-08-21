@@ -64,6 +64,21 @@ test("instruction blocks are recognised wherever they sit in the history", () =>
   expect(isInstructionMessage(toolResult("A file.html", 5))).toBe(false);
 });
 
+// Codex's own operating contract carries no block marker, so it counted as ordinary conversation
+// and sat second in the item order - the first thing fit recovery reached. Replaying 94 real
+// requests found it discarded from 26 of them while the <app-context> block beside it survived
+// every time, which is the exact trade this recovery is supposed to refuse to make.
+test("the Codex system prompt is part of the instruction contract", () => {
+  expect(isInstructionMessage({
+    role: "developer",
+    content: "You are Codex, an agent based on GPT-5. You are running as a coding agent.",
+    timestamp: 1,
+  })).toBe(true);
+  // Matching the full opening rather than "You are Codex" keeps ordinary prose that happens to
+  // start with those words out of the undroppable set.
+  expect(isInstructionMessage(userMessage("You are Codex now, pretend to be it", 2))).toBe(false);
+});
+
 test("fit recovery drops conversation and never the instruction contract", () => {
   const messages = [
     userMessage(APP_CONTEXT, 1),
