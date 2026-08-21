@@ -410,6 +410,11 @@ export function compileChatGptWebPrompt(
     ? [
       "For local work required by the task, use the attached Codex Native tools directly according to their declared descriptions and schemas.",
       "Use actual Codex Native results as evidence for local observations and effects, and keep calling tools until the requested work is complete and verified.",
+      // Codex writes these tool descriptions for its own transport, where a call costs a fraction
+      // of a second. Here every call is a browser round trip, measured at a median of 12.1 seconds
+      // across real turns, and a session was observed spending 60 consecutive empty stdin polls -
+      // roughly twelve minutes - harvesting one second of output at a time.
+      "Each Codex Native call here costs a full browser round trip of roughly ten seconds, far more than the same call costs Codex natively. Waiting is the expensive part, not the work: when a command is already running, ask for the longest output window the tool allows rather than polling in one-second slices, and prefer one call that completes a step over several that each advance it slightly.",
     ]
     : [
       `This is ChatGPT Web ${mode.displayLabel} with no Codex Native bridge to the user's local computer attached to this response. This restriction applies only to local Codex files, commands, processes, and computer mutations.`,
