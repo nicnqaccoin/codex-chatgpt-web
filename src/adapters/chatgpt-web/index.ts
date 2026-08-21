@@ -525,7 +525,12 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         // fact there was no way to say what actually breaks - the question could not be answered
         // even once. An unclassified failure is the expensive kind: it is rethrown rather than
         // reported, and the client answers by replaying the whole turn.
-        appendDiagnosticRecord("turn-failures.jsonl", {
+        //
+        // A turn the user interrupted arrives here as an AbortError, and it is not a failure. Every
+        // interruption would otherwise be filed as the expensive unclassified kind and the log would
+        // read as constant breakage while the user was simply steering.
+        const aborted = error instanceof Error && error.name === "AbortError";
+        if (!aborted) appendDiagnosticRecord("turn-failures.jsonl", {
           traceId,
           mode: session.runtime.mode,
           classified: error instanceof ChatGptWebAdapterError,
