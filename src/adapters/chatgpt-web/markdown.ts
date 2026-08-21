@@ -20,6 +20,50 @@ turndown.addRule("removeSvg", {
   filter: node => node.nodeName === "SVG",
   replacement: () => "",
 });
+function katexSource(node: Node): string | undefined {
+  const element = node as HTMLElement;
+  const source = element
+    .querySelector?.('annotation[encoding="application/x-tex"]')
+    ?.textContent
+    ?.trim();
+  return source || undefined;
+}
+turndown.addRule("katexDisplay", {
+  filter: node => (
+    node.nodeName === "SPAN"
+    && (node as HTMLElement).classList?.contains("katex-display")
+  ),
+  replacement: (content, node) => {
+    const source = katexSource(node);
+    return source ? `\n\n\\[\n${source}\n\\]\n\n` : content;
+  },
+});
+turndown.addRule("katexInline", {
+  filter: node => (
+    node.nodeName === "SPAN"
+    && (node as HTMLElement).classList?.contains("katex")
+    && !(node.parentElement as HTMLElement | null)?.classList?.contains("katex-display")
+  ),
+  replacement: (content, node) => {
+    const source = katexSource(node);
+    return source ? `\\(${source}\\)` : content;
+  },
+});
+turndown.addRule("chatGptMathSource", {
+  filter: node => (
+    (node.nodeName === "SPAN" || node.nodeName === "DIV")
+    && (node as HTMLElement).getAttribute?.("role") === "math"
+    && (node as HTMLElement).hasAttribute?.("data-math-source")
+  ),
+  replacement: (content, node) => {
+    const element = node as HTMLElement;
+    const source = element.getAttribute("data-math-source")?.trim();
+    if (!source) return content;
+    return node.nodeName === "DIV"
+      ? `\n\n\\[\n${source}\n\\]\n\n`
+      : `\\(${source}\\)`;
+  },
+});
 turndown.addRule("compactListItem", {
   filter: "li",
   replacement: (content, node, options) => {

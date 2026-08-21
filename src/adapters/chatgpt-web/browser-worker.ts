@@ -951,13 +951,21 @@ export class ChatGptBrowserWorker {
     await captureDiagnostic?.("effort-menu-open-requested");
     const effortChoices = effortMenu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
     const effortChoice = effortChoices.nth(uiEffortIndex);
-    const effortSlider = page.locator(CHATGPT_EFFORT_SLIDER_SELECTOR).filter({ visible: true }).last();
+    // The current ChatGPT UI exposes ARIA slider state on an aria-hidden
+    // descendant while the visible parent menuitem owns keyboard input.
+    // Wait and press on that parent, but continue reading values from the
+    // semantic slider node.  This also supports the previous visible-slider
+    // layout because it used the same menuitem ancestry.
+    const effortSlider = page.locator(CHATGPT_EFFORT_SLIDER_SELECTOR).last();
+    const effortSliderControl = effortSlider
+      .locator("xpath=ancestor::*[@role='menuitem'][1]")
+      .last();
     const waitAbort = new AbortController();
     let ready: "effort" | "slider" | "rate-limit";
     try {
       ready = await Promise.race([
         effortChoice.waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "effort" as const),
-        effortSlider.waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "slider" as const),
+        effortSlider.waitFor({ state: "attached", timeout: 70_000, signal: waitAbort.signal }).then(() => "slider" as const),
         chatGptRateLimitDialog(page).waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "rate-limit" as const),
       ]);
       if (ready === "rate-limit") await throwIfChatGptRateLimitDialog(page);
@@ -974,6 +982,7 @@ export class ChatGptBrowserWorker {
       waitAbort.abort();
     }
     if (ready === "slider") {
+      await effortSliderControl.waitFor({ state: "attached", timeout: 10_000 });
       let sliderState = parseChatGptEffortSliderState(
         await effortSlider.getAttribute("aria-valuemin"),
         await effortSlider.getAttribute("aria-valuemax"),
@@ -993,13 +1002,22 @@ export class ChatGptBrowserWorker {
           { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: false },
         );
       }
-      const sliderControl = effortSlider.locator("xpath=ancestor::*[@role='menuitem'][1]");
       while (sliderState.value !== targetValue) {
         await throwIfChatGptRateLimitDialog(page);
         const direction = targetValue > sliderState.value ? 1 : -1;
         const key = direction > 0 ? "ArrowRight" : "ArrowLeft";
         const previousValue = sliderState.value;
-        await sliderControl.press(key);
+        // Launcher-owned turn tabs deliberately run at a 0x0 viewport while the Studio window is
+        // hidden. The slider remains mounted and semantically active, but Playwright's locator
+        // actionability rejects its parent as hidden. Focus it through the DOM, then dispatch the
+        // trusted keyboard event through CDP so background turns do not burn a retry waiting for
+        // layout geometry that cannot exist.
+        await effortSliderControl.evaluate((element) => (element as HTMLElement).focus());
+        const focused = await effortSliderControl.evaluate(element => (
+          element === document.activeElement || element.contains(document.activeElement)
+        ));
+        if (!focused) throw new Error("ChatGPT effort slider control did not accept DOM focus");
+        await page.keyboard.press(key);
         const changeDeadline = Date.now() + 5_000;
         do {
           sliderState = parseChatGptEffortSliderState(
@@ -1222,6 +1240,13 @@ export class ChatGptBrowserWorker {
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
     catalogRefreshAvailable = false,
   ): Promise<Locator> {
+    // The launcher keeps its embedded ChatGPT view at 1x1 while another settings page is visible.
+    // Establish usable layout geometry before opening the virtualized attachment menu; resizing an
+    // already-open menu causes ChatGPT to detach and replace its rows during the transition.
+    const initialViewport = page.viewportSize();
+    if (initialViewport && (initialViewport.width < 640 || initialViewport.height < 480)) {
+      await page.setViewportSize({ width: 1_280, height: 900 });
+    }
     let composer = await this.activeComposer(page);
     await composer.fill("");
     if (await this.connectorIsSelected(composer)) {
@@ -1283,11 +1308,52 @@ export class ChatGptBrowserWorker {
     // resolved above. Composer-level ArrowDown/Enter can therefore select "Add photos & files" or
     // another sibling group. Activate only the uniquely resolved connector row and then require the
     // exact selected-connector marker as evidence before continuing.
-    // Use Playwright's real pointer activation. A DOM `dispatchEvent("click")` only fires an
-    // untrusted synthetic event; ChatGPT can update the visible badge while never committing the
-    // connector to the turn that is sent. Force the click only to bypass the popup's transient
-    // layout movement — the event itself remains a trusted browser input event.
-    await appResult.click({ force: true, timeout: 10_000 });
+    // Dispatch a trusted mouse input at the latest resolved row coordinates. Coordinate input
+    // avoids Playwright waiting forever for this virtualized row to stop being replaced during the
+    // menu's fill animation.
+    await settleChatGptUi();
+    await settleChatGptUi();
+    let activationViewport = page.viewportSize();
+    if (!activationViewport || activationViewport.width <= 0 || activationViewport.height <= 0) {
+      activationViewport = await page.evaluate(() => ({
+        width: window.innerWidth,
+        height: window.innerHeight,
+      })).catch(() => null);
+    }
+    let connectorBox: Awaited<ReturnType<Locator["boundingBox"]>> = null;
+    const geometryDeadline = Date.now() + 2_000;
+    while (!connectorBox && Date.now() < geometryDeadline) {
+      connectorBox = await appResult.boundingBox().catch(() => null);
+      if (!connectorBox) {
+        connectorBox = await appResult.evaluate((element) => {
+          const rect = element.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) return null;
+          return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+        }).catch(() => null);
+      }
+      if (!connectorBox) await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
+    }
+    if (!connectorBox || !activationViewport) {
+      const rowCount = await appResult.count().catch(() => 0);
+      const rowVisible = await appResult.isVisible().catch(() => false);
+      throw new Error(
+        `ChatGPT connector row did not expose pointer geometry`
+        + ` (viewport=${activationViewport?.width ?? 0}x${activationViewport?.height ?? 0}`
+        + `; rowCount=${rowCount}; rowVisible=${rowVisible})`,
+      );
+    }
+    const connectorX = connectorBox.x + connectorBox.width / 2;
+    const connectorY = connectorBox.y + connectorBox.height / 2;
+    if (connectorX < 0 || connectorY < 0
+      || connectorX >= activationViewport.width || connectorY >= activationViewport.height) {
+      // Background launcher tabs can expose a semantic DOM while Electron deliberately reports a
+      // 0x0/2x2 layout viewport. A trusted pointer coordinate cannot exist on that surface. Invoke
+      // the exact resolved row's click handler, then rely on the selected-connector marker below as
+      // the authoritative proof that React accepted the activation.
+      await appResult.evaluate(element => (element as HTMLElement).click());
+    } else {
+      await page.mouse.click(connectorX, connectorY);
+    }
     // Selecting a connector replaces the Lexical composer subtree. Resolve the active composer
     // again instead of returning the pre-selection locator, otherwise the real turn can focus a
     // detached/hidden editor even though verification just succeeded.

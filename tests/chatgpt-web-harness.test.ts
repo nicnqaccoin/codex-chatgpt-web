@@ -1217,6 +1217,45 @@ describe("ChatGPT outer-native harness v4", () => {
     expect(markdown).toContain("[Open repository](https://github.com/example/repo)");
   });
 
+  test("preserves KaTeX fractions as native Codex math instead of flattened visual glyphs", () => {
+    const fraction = [
+      '<span class="katex">',
+      '<span class="katex-mathml"><math><semantics><mrow><mi>a</mi><mo>=</mo><mfrac><mi>F</mi><mi>m</mi></mfrac></mrow>',
+      '<annotation encoding="application/x-tex">a=\\frac{F}{m}</annotation></semantics></math></span>',
+      '<span class="katex-html" aria-hidden="true"><span>a=</span><span><span>F</span><span>m</span></span></span>',
+      '</span>',
+    ].join("");
+    const html = `<p>Gia tốc được tính bằng ${fraction}.</p>`;
+
+    expect(chatGptHtmlToMarkdown(html)).toBe("Gia tốc được tính bằng \\(a=\\frac{F}{m}\\).");
+  });
+
+  test("preserves ChatGPT's current data-math-source DOM without reversing fractions", () => {
+    const html = [
+      '<p>Gia tốc được tính bằng ',
+      '<span role="math" aria-label="a=\\frac{F}{m}" data-math-source="a=\\frac{F}{m}" data-client-katex-layout="">',
+      '<span class="katex"><span class="katex-html" aria-hidden="true">',
+      '<span class="base"><span>a=</span></span>',
+      '<span class="base"><span class="mfrac"><span>m</span><span>F</span></span></span>',
+      '</span></span></span>.</p>',
+    ].join("");
+
+    expect(chatGptHtmlToMarkdown(html)).toBe("Gia tốc được tính bằng \\(a=\\frac{F}{m}\\).");
+  });
+
+  test("preserves display KaTeX once without serializing its accessibility duplicate", () => {
+    const html = [
+      '<p>Công thức:</p>',
+      '<span class="katex-display"><span class="katex">',
+      '<span class="katex-mathml"><math><semantics><mfrac><mi>F</mi><mi>m</mi></mfrac>',
+      '<annotation encoding="application/x-tex">a=\\frac{F}{m}</annotation></semantics></math></span>',
+      '<span class="katex-html" aria-hidden="true"><span>F</span><span>m</span></span>',
+      '</span></span>',
+    ].join("");
+
+    expect(chatGptHtmlToMarkdown(html)).toBe("Công thức:\n\n\\[\na=\\frac{F}{m}\n\\]");
+  });
+
   test("replays the complete outer Codex context, including prior reasoning and tool evidence", () => {
     const request = parsed();
     request.context.systemPrompt = ["system-rule", "repo-rule"];
@@ -1424,6 +1463,84 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(finalDone).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
       expect(finalDone.usage!.inputTokens).toBeGreaterThan(95_000);
       expect(finalDone.usage!.inputTokens).toBeGreaterThan(firstDone.usage!.inputTokens + 50_000);
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      await TurnBroker.forSocket(socketPath).close();
+    }
+  });
+
+  test("restores a missing Visualize reference after the browser finishes its tool loop", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h3-visualize-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: "browser://chatgpt-visualize-test",
+      chatgptWeb: { brokerSocketPath: socketPath, turnTimeoutMs: 30_000, localToolsEnabled: true, solAvailable: true, proAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      const prepared = await turn.prepare();
+      try {
+        const token = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)?.[1];
+        if (!token) throw new Error("turn token missing from compiled prompt");
+        const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
+        await callTurnBroker<BrokerToolResult>(socketPath, {
+          method: "invoke",
+          bindingId: claimed.bindingId,
+          wireName: "apply_patch",
+          freeform: true,
+          input: "*** Begin Patch\n*** End Patch",
+        }, 30_000);
+        turn.onTextDelta("Visualization created.");
+        return "Visualization created.";
+      } finally {
+        prepared.release();
+      }
+    };
+
+    const visualizationPath = "C:\\Users\\person\\.codex\\visualizations\\2026\\08\\21\\thread-id\\lesson.html";
+    const reference = `visualize${JSON.stringify({ path: visualizationPath })}`;
+    const adapter = createChatGptWebAdapter(provider);
+    const initial = rawWireRequest(environmentXml);
+    initial.context.messages.at(-1)!.content = "[@Visualize](plugin://visualize@openai-bundled) create a lesson";
+    const firstEvents: AdapterEvent[] = [];
+    try {
+      await adapter.runTurn!(initial, { headers: new Headers() }, event => firstEvents.push(event));
+      const call = firstEvents.find(
+        (event): event is Extract<AdapterEvent, { type: "tool_call_start" }> => event.type === "tool_call_start",
+      );
+      expect(call?.name).toBe("apply_patch");
+
+      const continuation = structuredClone(initial);
+      const resultText = `Exit code: 0\nOutput:\nSuccess. Updated the following files:\nM ${visualizationPath}\n`;
+      continuation.context.messages.push(
+        {
+          role: "assistant",
+          content: [{ type: "toolCall", id: call!.id, name: "apply_patch", arguments: { input: "*** Begin Patch\n*** End Patch" } }],
+          timestamp: 3,
+        },
+        {
+          role: "toolResult",
+          toolCallId: call!.id,
+          toolName: "apply_patch",
+          content: resultText,
+          isError: false,
+          timestamp: 4,
+        },
+      );
+      ((continuation._rawBody as { input: unknown[] }).input).push(
+        { type: "custom_tool_call", call_id: call!.id, name: "apply_patch", input: "*** Begin Patch\n*** End Patch" },
+        { type: "custom_tool_call_output", call_id: call!.id, output: resultText },
+      );
+
+      const finalEvents: AdapterEvent[] = [];
+      await adapter.runTurn!(continuation, { headers: new Headers() }, event => finalEvents.push(event));
+      const text = finalEvents
+        .filter((event): event is Extract<AdapterEvent, { type: "text_delta" }> => event.type === "text_delta" && event.phase === "final_answer")
+        .map(event => event.text)
+        .join("");
+      expect(text).toBe(`Visualization created.\n\n${reference}`);
+      expect(finalEvents.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
     } finally {
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
       await TurnBroker.forSocket(socketPath).close();

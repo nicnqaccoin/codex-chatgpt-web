@@ -430,11 +430,8 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
   const appResult = {
     waitFor: async () => { calls.push(["waitForResult"]); },
     count: async () => 1,
-    click: async (options: { force: boolean; timeout: number }) => {
-      expect(options).toEqual({ force: true, timeout: 10_000 });
-      connectorSelected = true;
-      calls.push(["click"]);
-    },
+    isVisible: async () => true,
+    boundingBox: async () => ({ x: 20, y: 30, width: 200, height: 40 }),
   };
   const selectedConnector = {
     waitFor: async () => {
@@ -463,6 +460,13 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
     },
   };
   const page = {
+    viewportSize: () => ({ width: 1_280, height: 900 }),
+    mouse: {
+      click: async () => {
+        connectorSelected = true;
+        calls.push(["clickConnector"]);
+      },
+    },
     getByText: (text: string, options: { exact: boolean }) => {
       expect(text).toBe("Codex Native2");
       expect(options).toEqual({ exact: true });
@@ -504,7 +508,7 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
     ["focus"],
     ["pressSequentially", "@c"],
     ["waitForResult"],
-    ["click"],
+    ["clickConnector"],
     ["waitForSelectedConnector"],
   ]);
 });
@@ -529,11 +533,8 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
       if (menuAttempt === 1) throw timeout;
     },
     count: async () => 1,
-    click: async (options: { force: boolean; timeout: number }) => {
-      expect(options).toEqual({ force: true, timeout: 10_000 });
-      selected = true;
-      calls.push("activate");
-    },
+    isVisible: async () => true,
+    boundingBox: async () => ({ x: 20, y: 30, width: 200, height: 40 }),
   };
   const selectedComposer = {
     locator: () => ({ filter: () => selectedConnector }),
@@ -547,6 +548,8 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
     },
   };
   const page = {
+    viewportSize: () => ({ width: 1_280, height: 900 }),
+    mouse: { click: async () => { selected = true; calls.push("activate"); } },
     getByText: () => ({ exactConnectorLabel: true }),
     locator: (selector: string) => selector.includes("__menu-item")
       ? { filter: () => appResult, evaluateAll: async () => [] }
@@ -596,10 +599,8 @@ test("connector verification refreshes one stale catalog and re-proves the exact
       }
     },
     count: async () => catalogFresh ? 1 : 0,
-    click: async () => {
-      selected = true;
-      calls.push("activate");
-    },
+    isVisible: async () => catalogFresh,
+    boundingBox: async () => ({ x: 20, y: 30, width: 200, height: 40 }),
   };
   const visibleRows = {
     allInnerTexts: async () => catalogFresh ? ["Codex Native2"] : ["Another connector"],
@@ -614,6 +615,8 @@ test("connector verification refreshes one stale catalog and re-proves the exact
   };
   const selectedComposer = { selected: true };
   const page = {
+    viewportSize: () => ({ width: 1_280, height: 900 }),
+    mouse: { click: async () => { selected = true; calls.push("activate"); } },
     reload: async () => {
       if (catalogFresh) throw new Error("connector catalog reloaded twice");
       catalogFresh = true;
@@ -668,6 +671,7 @@ test("connector catalog refresh stays fail-closed for absent, legacy, and exact 
   const run = async (visibleRows: string[]) => {
     let now = realDateNow();
     const page = {
+      viewportSize: () => ({ width: 1_280, height: 900 }),
       getByText: () => ({ exactConnectorLabel: true }),
       locator: () => ({
         filter: (options: { has?: unknown; visible?: boolean }) => options.visible
@@ -722,11 +726,8 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   const appResult = {
     waitFor: async () => { calls.push(["connectorMenu"]); },
     count: async () => 1,
-    click: async (options: { force: boolean; timeout: number }) => {
-      expect(options).toEqual({ force: true, timeout: 10_000 });
-      selected = true;
-      calls.push(["selectConnector"]);
-    },
+    isVisible: async () => true,
+    boundingBox: async () => ({ x: 20, y: 30, width: 200, height: 40 }),
   };
   const selectedComposer = {
     focus: async () => { calls.push(["selectedFocus"]); },
@@ -738,6 +739,8 @@ test("tool-capable prompts use the shared Playwright connector selection before 
     pressSequentially: async (value: string) => { calls.push(["type", value]); },
   };
   const page = {
+    viewportSize: () => ({ width: 1_280, height: 900 }),
+    mouse: { click: async () => { selected = true; calls.push(["selectConnector"]); } },
     getByText: () => ({ exactConnectorLabel: true }),
     locator: (selector: string) => selector.includes("__menu-item")
       ? { filter: () => appResult, evaluateAll: async () => [] }
@@ -863,12 +866,20 @@ test("effort selection uses structural menu and slider indices instead of locali
   expect(sessionSource).toContain('[role="group"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])');
   expect(sessionSource).toContain('[role="menuitemradio"]');
   expect(sessionSource).toContain('[data-model-reasoning-effort-slider] [role="slider"]');
+  expect(sessionSource).toContain("slider.waitFor({ state: \"attached\"");
+  expect(sessionSource).toContain("sliderControl.waitFor({ state: \"attached\"");
+  expect(workerSource).toContain("element === document.activeElement || element.contains(document.activeElement)");
+  expect(workerSource).toContain("await page.keyboard.press(key)");
+  expect(sessionSource).not.toContain("locator(CHATGPT_EFFORT_SLIDER_SELECTOR).filter({ visible: true })");
   expect(sessionSource).not.toContain(":popover-open");
   expect(sessionSource).not.toContain("data-radix-collection-item");
   expect(workerSource).toContain('getAttribute("aria-checked")');
   expect(workerSource).toContain('getAttribute("aria-expanded")');
   expect(workerSource).toContain('getAttribute("aria-valuenow")');
-  expect(workerSource).toContain("sliderControl.press(key)");
+  expect(workerSource).not.toContain("effortSliderControl.press(key)");
+  expect(workerSource).toContain("effortSlider.waitFor({ state: \"attached\"");
+  expect(workerSource).toContain("effortSliderControl.waitFor({ state: \"attached\"");
+  expect(workerSource).not.toContain("locator(CHATGPT_EFFORT_SLIDER_SELECTOR).filter({ visible: true })");
   expect(workerSource).not.toContain("currentLabel === targetLabel");
   expect(workerSource).not.toContain("chatGptEffortLabelsMatch");
   expect(workerSource).not.toMatch(/getByRole\("button", \{\s*name: "(?:Instant|Medium|High|Extra High|Pro)"/);

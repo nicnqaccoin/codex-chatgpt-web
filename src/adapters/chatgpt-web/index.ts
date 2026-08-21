@@ -7,6 +7,7 @@ import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./environment";
+import { repairMissingFinalArtifactReference } from "./final-artifacts";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
@@ -470,16 +471,21 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               emitNewTrace(session.runtime.trace.drain());
               emitNewText(session.runtime.text.drain());
               if (next.type === "browser") {
-                session.setFinalReasoning(roundReasoning);
-                session.setFinalEvents(roundEvents);
                 if (turnToken) broker.revoke(turnToken);
                 if (next.outcome.type === "error") throw next.outcome.error;
                 if (session.runtime.text.value() !== next.outcome.answer) {
                   throw new Error("ChatGPT browser Markdown stream did not reproduce the completed answer");
                 }
+                const repaired = repairMissingFinalArtifactReference(parsed, next.outcome.answer);
+                if (repaired.delta) {
+                  emitNewText([repaired.delta]);
+                  console.info("[chatgpt-web] restored missing Codex visualization reference in final answer");
+                }
+                session.setFinalReasoning(roundReasoning);
+                session.setFinalEvents(roundEvents);
                 emitBrowserCompletion(
                   next.outcome,
-                  estimateChatGptWebUsage(currentUsageInput(parsed), { answer: next.outcome.answer, reasoning: roundReasoning }, turnCapabilities),
+                  estimateChatGptWebUsage(currentUsageInput(parsed), { answer: repaired.answer, reasoning: roundReasoning }, turnCapabilities),
                   emit,
                 );
                 chatGptWebTurnRetryPolicy.clear(retryKey);

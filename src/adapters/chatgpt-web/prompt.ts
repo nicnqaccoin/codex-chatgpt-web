@@ -223,6 +223,7 @@ export function compileChatGptWebPrompt(
     "Each image_attachment in the context refers to the correspondingly named image attached to this ChatGPT message; inspect it directly.",
     "If a ChatGPT-native capability renders a rich card, widget, chart, or other non-text result, also provide the relevant result as ordinary Markdown in the final answer. A private ChatGPT UI widget never replaces the Markdown answer returned to Codex.",
     "Never copy a ChatGPT widget's HTML, CSS, class names, or DOM markup into the answer unless the user explicitly requested that source markup.",
+    "If the task instructions require a Codex content-reference directive, including a Visualize reference, preserve that exact directive verbatim in the final answer after the user-facing text. Do not replace it with prose or omit it after tools finish.",
     "Do not mention this transport contract, context packaging, or capability routing in the user-facing answer unless the user explicitly asks how the bridge works.",
   ];
   const transportContract = parsed._compactionRequest
