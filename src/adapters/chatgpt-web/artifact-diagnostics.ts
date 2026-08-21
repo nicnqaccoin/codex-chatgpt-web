@@ -26,6 +26,8 @@ export function recordArtifactDetectionMiss(
   messages: readonly CodexMessage[],
   latestUserIndex: number,
 ): void {
+  // Test fixtures deliberately exercise the miss paths; their records would drown the real ones.
+  if (process.env.NODE_ENV === "test" || process.env.BUN_TEST) return;
   if (recorded >= MAX_RECORDS) return;
   const scanned = messages.slice(latestUserIndex + 1);
   const pathsAnywhere = messages.filter(message => VISUALIZATION_MARKER.test(messageText(message))).length;
