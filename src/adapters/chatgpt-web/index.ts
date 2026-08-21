@@ -374,6 +374,7 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
           if (settled) {
             if (settled.type === "error") throw settled.error;
             let reasoning = session.reasoningForFinalReplay();
+            let answer = settled.answer;
             const replay = session.eventsForFinalReplay();
             if (replay.length > 0) {
               replayEvents(replay, emit);
@@ -391,10 +392,20 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
               if (session.runtime.text.value() !== settled.answer) {
                 throw new Error("ChatGPT browser Markdown stream did not reproduce the completed answer");
               }
+              // A tool loop usually settles the browser answer before Codex comes back for it, so
+              // this replay - not the live branch below - is where a Visualize turn finishes. The
+              // artifact repair has to run here too, and its delta belongs in the stored events so
+              // later replays of the same outcome stay identical.
+              const repaired = repairMissingFinalArtifactReference(parsed, settled.answer);
+              if (repaired.delta) {
+                emitTextDeltas([repaired.delta], emitCaptured);
+                console.info("[chatgpt-web] restored missing Codex visualization reference in settled answer");
+              }
+              answer = repaired.answer;
               session.setFinalReasoning(reasoning);
               session.setFinalEvents(events);
             }
-            emitBrowserCompletion(settled, estimateChatGptWebUsage(currentUsageInput(parsed), { answer: settled.answer, reasoning }, turnCapabilities), emit);
+            emitBrowserCompletion(settled, estimateChatGptWebUsage(currentUsageInput(parsed), { answer, reasoning }, turnCapabilities), emit);
             chatGptWebTurnRetryPolicy.clear(retryKey);
             return;
           }
