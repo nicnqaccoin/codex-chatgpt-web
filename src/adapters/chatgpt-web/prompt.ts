@@ -14,6 +14,7 @@ import {
   elideToolResultText,
   isInstructionMessage,
   pruneSemanticToolResults,
+  textFromContent,
   type SemanticPruneOptions,
 } from "./prune";
 
@@ -216,6 +217,48 @@ export function withoutSupersededModelSwitchContracts(messages: readonly CodexMe
     }
   }
   return messages.filter((_message, index) => !dropped.has(index));
+}
+
+/**
+ * `elidedToolResults: 0` cannot tell "this history held nothing worth pruning" apart from "the
+ * pruner did not recognise this history at all" - the second is what a live session actually
+ * reported while fit recovery was discarding five to eight messages per turn. Record what the turn
+ * carried so the next tuning pass has evidence instead of a guess. Only computed on turns that are
+ * already losing history, which is the only case worth explaining.
+ */
+function summarizePruneOpportunity(
+  before: readonly CodexMessage[],
+  pruned: readonly CodexMessage[],
+): Record<string, unknown> {
+  const roleCounts: Record<string, number> = {};
+  const toolNames: Record<string, number> = {};
+  let toolResults = 0;
+  let toolResultChars = 0;
+  let largestToolResultChars = 0;
+  let prunedChars = 0;
+  before.forEach((message, index) => {
+    roleCounts[message.role] = (roleCounts[message.role] ?? 0) + 1;
+    if (message.role !== "toolResult") return;
+    const text = textFromContent(message.content);
+    toolResults += 1;
+    toolResultChars += text.length;
+    largestToolResultChars = Math.max(largestToolResultChars, text.length);
+    const name = message.toolName || "(unnamed)";
+    toolNames[name] = (toolNames[name] ?? 0) + 1;
+    const prunedMessage = pruned[index];
+    const prunedText = prunedMessage?.role === "toolResult"
+      ? textFromContent(prunedMessage.content)
+      : text;
+    prunedChars += text.length - prunedText.length;
+  });
+  return {
+    roleCounts,
+    toolResults,
+    toolResultChars,
+    largestToolResultChars,
+    prunedChars,
+    toolNames,
+  };
 }
 
 /**
@@ -431,6 +474,7 @@ export function compileChatGptWebPrompt(
 
   const contractedMessages = withoutSupersededModelSwitchContracts(parsed.context.messages);
   let sourceMessages = pruneSemanticToolResults(contractedMessages);
+  const prunedMessages = sourceMessages;
   const elidedToolResults = sourceMessages
     .filter((message, index) => message !== contractedMessages[index]).length;
   const initialMessageCount = sourceMessages.length;
@@ -485,6 +529,7 @@ export function compileChatGptWebPrompt(
       promptChars: compiled.text.length,
       promptJsonBytes: chatGptPromptJsonBytes(compiled.text),
       composerCharLimit,
+      ...summarizePruneOpportunity(contractedMessages, prunedMessages),
     });
   }
 
