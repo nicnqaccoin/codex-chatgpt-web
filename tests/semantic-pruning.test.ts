@@ -12,6 +12,7 @@ import {
   CHATGPT_VERBATIM_TOOL_RESULT_MESSAGES,
 } from "../src/adapters/chatgpt-web/prompt";
 import { requiredVisualizationReference } from "../src/adapters/chatgpt-web/final-artifacts";
+import { chatGptWebHistoryIsCollapsing } from "../src/adapters/chatgpt-web/index";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import type { ChatGptWebCapabilities } from "../src/adapters/chatgpt-web/model";
 import type { CodexMessage, CodexParsedRequest, CodexToolResultMessage } from "../src/types";
@@ -493,4 +494,19 @@ test("handles empty and edge case inputs safely", () => {
   ];
   expect(getLatestUserIndex(onlyInstructions)).toBe(1);
   expect(isInstructionMessage(onlyInstructions[0]!)).toBe(true);
+});
+
+// Replacing the conversation with a summary the model wrote is the right trade only once fit
+// recovery is discarding history structurally - a real session kept 8 messages of 70 at its worst.
+// For an ordinary trim the surviving history is worth more than the précis.
+test("the checkpoint replaces history only when the loss is structural", () => {
+  expect(chatGptWebHistoryIsCollapsing(0, 70)).toBe(false);
+  expect(chatGptWebHistoryIsCollapsing(2, 70)).toBe(false);
+  expect(chatGptWebHistoryIsCollapsing(11, 70)).toBe(false);
+  expect(chatGptWebHistoryIsCollapsing(18, 70)).toBe(true);
+  expect(chatGptWebHistoryIsCollapsing(62, 70)).toBe(true);
+
+  // A short conversation has no quarter to lose, so the floor decides instead of the fraction.
+  expect(chatGptWebHistoryIsCollapsing(2, 12)).toBe(false);
+  expect(chatGptWebHistoryIsCollapsing(8, 12)).toBe(true);
 });
