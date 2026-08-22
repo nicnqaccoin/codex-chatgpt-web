@@ -1285,18 +1285,30 @@ export class ChatGptBrowserWorker {
   }
 
   private async attachedPromptText(page: Page): Promise<string> {
-    const composer = await this.activeComposer(page);
-    return composer.evaluate(element => {
-      const clone = element.cloneNode(true) as HTMLElement;
-      clone.querySelectorAll(
-        '[data-id^="plugin:"][data-keyword], [data-inline-selection-pill-cursor-target]',
-      )
-        .forEach(part => part.remove());
-      return [...clone.childNodes]
-        .map(child => child.textContent ?? "")
-        .join("\n")
-        .trimStart();
-    }, undefined, { timeout: 20_000 });
+    const composers = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
+    const deadline = Date.now() + 30_000;
+    let count = 0;
+    while (Date.now() < deadline) {
+      const readback = await composers.evaluateAll(elements => {
+        if (elements.length !== 1) return { count: elements.length, text: null as string | null };
+        const clone = elements[0]!.cloneNode(true) as HTMLElement;
+        clone.querySelectorAll(
+          '[data-id^="plugin:"][data-keyword], [data-inline-selection-pill-cursor-target]',
+        )
+          .forEach(part => part.remove());
+        return {
+          count: 1,
+          text: [...clone.childNodes]
+            .map(child => child.textContent ?? "")
+            .join("\n")
+            .trimStart(),
+        };
+      });
+      count = readback.count;
+      if (readback.text !== null) return readback.text;
+      await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
+    }
+    throw new Error(`ChatGPT did not expose exactly one visible composer (visibleComposers=${count})`);
   }
 
   private async assertPromptAttached(
@@ -1431,50 +1443,71 @@ export class ChatGptBrowserWorker {
     // resolved above. Composer-level ArrowDown/Enter can therefore select "Add photos & files" or
     // another sibling group. Activate only the uniquely resolved connector row and then require the
     // exact selected-connector marker as evidence before continuing.
-    // Dispatch a trusted mouse input at the latest resolved row coordinates. Coordinate input
-    // avoids Playwright waiting forever for this virtualized row to stop being replaced during the
-    // menu's fill animation.
-    await settleChatGptMenuAnimation();
-    let activationViewport = page.viewportSize();
-    if (!activationViewport || activationViewport.width <= 0 || activationViewport.height <= 0) {
-      activationViewport = await page.evaluate(() => ({
-        width: window.innerWidth,
-        height: window.innerHeight,
-      })).catch(() => null);
-    }
-    let connectorBox: Awaited<ReturnType<Locator["boundingBox"]>> = null;
-    const geometryDeadline = Date.now() + 2_000;
-    while (!connectorBox && Date.now() < geometryDeadline) {
-      connectorBox = await appResult.boundingBox().catch(() => null);
-      if (!connectorBox) {
-        connectorBox = await appResult.evaluate((element) => {
-          const rect = element.getBoundingClientRect();
-          if (rect.width <= 0 || rect.height <= 0) return null;
-          return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
-        }).catch(() => null);
-      }
-      if (!connectorBox) await new Promise(resolveSleep => setTimeout(resolveSleep, 25));
-    }
-    if (!connectorBox || !activationViewport) {
-      const rowCount = await appResult.count().catch(() => 0);
-      const rowVisible = await appResult.isVisible().catch(() => false);
-      throw new Error(
-        `ChatGPT connector row did not expose pointer geometry`
-        + ` (viewport=${activationViewport?.width ?? 0}x${activationViewport?.height ?? 0}`
-        + `; rowCount=${rowCount}; rowVisible=${rowVisible})`,
-      );
-    }
-    const connectorX = connectorBox.x + connectorBox.width / 2;
-    const connectorY = connectorBox.y + connectorBox.height / 2;
-    if (connectorX < 0 || connectorY < 0
-      || connectorX >= activationViewport.width || connectorY >= activationViewport.height) {
-      // Background launcher tabs can expose a semantic DOM while Electron deliberately reports a
-      // 0x0/2x2 layout viewport. A trusted pointer coordinate cannot exist on that surface. Invoke
-      // the exact resolved row's click handler, then rely on the selected-connector marker below as
-      // the authoritative proof that React accepted the activation.
+    // The exact row is already resolved and uniquely verified above. A DOM click is independent of
+    // the menu's transient geometry, so it can activate that row immediately instead of paying the
+    // fill-animation settle plus bounding-box round trips. Keep the trusted-pointer path as a
+    // fallback for surfaces that reject direct DOM activation.
+    let activatedViaDom = false;
+    let domSelectedComposer: Locator | undefined;
+    try {
       await appResult.evaluate(element => (element as HTMLElement).click());
-    } else {
-      await page.mouse.click(connectorX, connectorY);
+      domSelectedComposer = await this.activeComposer(page, CHATGPT_UI_SETTLE_MS);
+      const domSelectedConnector = this.selectedConnectorControl(domSelectedComposer);
+      await domSelectedConnector.waitFor({ state: "visible", timeout: CHATGPT_UI_SETTLE_MS });
+      activatedViaDom = await this.connectorIsSelected(domSelectedComposer);
+    } catch {
+      // Fall through to the established geometry path below.
+    }
+    if (!activatedViaDom) {
+      await settleChatGptMenuAnimation();
+      // The probe above bounds how long React gets to paint the selected marker, not whether the
+      // click landed: a slow-but-successful activation reads exactly like a rejected one. The
+      // settle has now given it the rest of that time, so re-read the marker before activating
+      // again. A second activation on an already-selected row can toggle it back off, and this path
+      // exists to recover a click the surface refused - not to repeat one that merely rendered
+      // late. The locator is lazy, so re-reading it costs no extra composer resolution.
+      if (domSelectedComposer) {
+        activatedViaDom = await this.connectorIsSelected(domSelectedComposer).catch(() => false);
+      }
+    }
+    if (!activatedViaDom) {
+      let activationViewport = page.viewportSize();
+      if (!activationViewport || activationViewport.width <= 0 || activationViewport.height <= 0) {
+        activationViewport = await page.evaluate(() => ({
+          width: window.innerWidth,
+          height: window.innerHeight,
+        })).catch(() => null);
+      }
+      let connectorBox: Awaited<ReturnType<Locator["boundingBox"]>> = null;
+      const geometryDeadline = Date.now() + 2_000;
+      while (!connectorBox && Date.now() < geometryDeadline) {
+        connectorBox = await appResult.boundingBox().catch(() => null);
+        if (!connectorBox) {
+          connectorBox = await appResult.evaluate((element) => {
+            const rect = element.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) return null;
+            return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+          }).catch(() => null);
+        }
+        if (!connectorBox) await new Promise(resolveSleep => setTimeout(resolveSleep, 25));
+      }
+      if (!connectorBox || !activationViewport) {
+        const rowCount = await appResult.count().catch(() => 0);
+        const rowVisible = await appResult.isVisible().catch(() => false);
+        throw new Error(
+          `ChatGPT connector row did not expose pointer geometry`
+          + ` (viewport=${activationViewport?.width ?? 0}x${activationViewport?.height ?? 0}`
+          + `; rowCount=${rowCount}; rowVisible=${rowVisible})`,
+        );
+      }
+      const connectorX = connectorBox.x + connectorBox.width / 2;
+      const connectorY = connectorBox.y + connectorBox.height / 2;
+      if (connectorX < 0 || connectorY < 0
+        || connectorX >= activationViewport.width || connectorY >= activationViewport.height) {
+        await appResult.evaluate(element => (element as HTMLElement).click());
+      } else {
+        await page.mouse.click(connectorX, connectorY);
+      }
     }
     // Selecting a connector replaces the Lexical composer subtree. Resolve the active composer
     // again instead of returning the pre-selection locator, otherwise the real turn can focus a
@@ -1523,7 +1556,6 @@ export class ChatGptBrowserWorker {
   private async reanchorPromptCaret(page: Page, abortSignal?: AbortSignal): Promise<void> {
     throwIfPromptAttachmentAborted(abortSignal);
     const composer = await this.activeComposer(page);
-    await composer.focus();
     const anchored = await composer.evaluate(async element => {
       const ignoredSelector = '[data-id^="plugin:"][data-keyword], [data-inline-selection-pill-cursor-target]';
       const editableRootNodes = [...element.childNodes].filter(node => (
@@ -1567,6 +1599,7 @@ export class ChatGptBrowserWorker {
         return false;
       }
 
+      (element as HTMLElement).focus({ preventScroll: true });
       const selection = window.getSelection();
       if (!selection) return false;
       const selectionIsExact = (): boolean => selection.isCollapsed

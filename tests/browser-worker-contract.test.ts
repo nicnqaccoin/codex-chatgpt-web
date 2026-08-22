@@ -530,6 +530,68 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
   ]);
 });
 
+test("a DOM click whose marker paints late is not activated a second time", async () => {
+  // The fast path bounds how long React gets to paint the selected marker. That bound says nothing
+  // about whether the click landed, so a slow-but-successful activation used to fall through to the
+  // trusted-pointer path and click the row again - and a second activation on an already-selected
+  // row can toggle it back off.
+  const calls: string[] = [];
+  let connectorSelected = false;
+  let markerPaints = 0;
+  const appResult = {
+    waitFor: async () => { calls.push("waitForResult"); },
+    count: async () => 1,
+    isVisible: async () => true,
+    boundingBox: async () => ({ x: 20, y: 30, width: 200, height: 40 }),
+    evaluate: async () => {
+      calls.push("domClick");
+      connectorSelected = true;
+    },
+  };
+  const selectedConnector = {
+    waitFor: async () => {
+      markerPaints += 1;
+      // The marker is still being painted when the fast path probes for it.
+      if (markerPaints === 1) throw new Error("selected connector marker not painted yet");
+      calls.push("waitForSelectedConnector");
+    },
+    count: async () => 1,
+  };
+  const selectedComposer = {
+    locator: () => ({ filter: () => selectedConnector }),
+  };
+  const initialComposer = {
+    fill: async () => { calls.push("fill"); },
+    focus: async () => { calls.push("focus"); },
+    pressSequentially: async () => { calls.push("pressSequentially"); },
+  };
+  const page = {
+    viewportSize: () => ({ width: 1_280, height: 900 }),
+    mouse: { click: async () => { calls.push("clickConnector"); } },
+    getByText: () => ({ exactConnectorLabel: true }),
+    locator: (selector: string) => {
+      if (selector.includes("__menu-item")) {
+        return { evaluateAll: async () => [], filter: () => appResult };
+      }
+      throw new Error(`Unexpected locator: ${selector}`);
+    },
+  };
+  const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
+    selectConnector(page: unknown): Promise<unknown>;
+  }).selectConnector;
+
+  const resolved = await selectConnector.call({
+    config: { appName: "Codex Native2" },
+    connectorIsSelected: async () => connectorSelected,
+    selectedConnectorControl: () => selectedConnector,
+    activeComposer: async () => (connectorSelected ? selectedComposer : initialComposer),
+  }, page);
+
+  expect(resolved).toBe(selectedComposer);
+  expect(calls).toContain("domClick");
+  expect(calls).not.toContain("clickConnector");
+});
+
 test("connector selection retriggers the complete mention after a fresh-page hydration miss", async () => {
   const calls: string[] = [];
   let menuAttempt = 0;
