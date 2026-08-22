@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "agentmemory": {
+      "command": "C:\\Program Files\\nodejs\\node.exe",
+      "args": [
+        "C:\\Users\\nguye\\AppData\\Roaming\\npm\\node_modules\\@agentmemory\\agentmemory\\dist\\cli.mjs",
+        "mcp"
+      ],
+      "env": {
+        "STANDALONE_PERSIST_PATH": "C:/Users/nguye/.agentmemory/local.db"
+      }
+    }
+  }
+}
