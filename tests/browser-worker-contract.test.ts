@@ -1559,3 +1559,16 @@ test("visible reasoning keeps the browser turn healthy before final assistant ma
   expect(health.update(reasoning, 1_000)).toBeUndefined();
   expect(health.update(reasoning, 10_000)).toBeUndefined();
 });
+
+// Extending rolling checkpoints past Luna missed a guard here rather than in the prompt compiler,
+// and a turn died after eight minutes with "valid only for ChatGPT Luna". Removing a restriction
+// means finding every place that enforces it, so this pins the one that was missed.
+test("checkpoint capture is not restricted by model in the browser worker", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const runBrowserTurn = workerSource.slice(workerSource.indexOf("  private async runBrowserTurn("));
+
+  expect(runBrowserTurn).not.toContain("valid only for ChatGPT Luna");
+  expect(runBrowserTurn).not.toContain("captureLunaCheckpoint && turn.modelId !==");
+  // The pairing guard must stay: capture and its callback arrive together or not at all.
+  expect(runBrowserTurn).toContain("requires exactly one checkpoint callback");
+});
