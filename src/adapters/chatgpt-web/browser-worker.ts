@@ -2174,6 +2174,7 @@ export class ChatGptBrowserWorker {
       let lastActivityAt = sentAt;
       let lastObservedVisibleText = "";
       let lastObservedTraceCount = 0;
+      let lastObservedTraceChars = 0;
       const visibleTrace = new ChatGptVisibleTraceTracker();
       const markdownBuffer = new ChatGptMarkdownBuffer();
       const checkpointStream = turn.captureLunaCheckpoint
@@ -2246,8 +2247,13 @@ export class ChatGptBrowserWorker {
             lastActivityAt = Date.now();
             loggedCompletionWait = false;
           }
-          if (snapshot.traceBlocks.length !== lastObservedTraceCount) {
+          // Reasoning streams into a block that is already there, so counting blocks misses a long
+          // think entirely: the count holds while the text grows, and none of the other signals
+          // watch reasoning. Measure the written characters instead, which moves either way.
+          const traceChars = snapshot.traceBlocks.reduce((total, block) => total + block.text.length, 0);
+          if (snapshot.traceBlocks.length !== lastObservedTraceCount || traceChars !== lastObservedTraceChars) {
             lastObservedTraceCount = snapshot.traceBlocks.length;
+            lastObservedTraceChars = traceChars;
             lastActivityAt = Date.now();
             loggedCompletionWait = false;
           }
