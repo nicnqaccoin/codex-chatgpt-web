@@ -36,6 +36,13 @@ export interface CompiledChatGptWebPrompt {
   images: ChatGptWebPromptImage[];
   /** Oldest history items removed by native-style compaction fit recovery; absent on normal turns. */
   trimmedCompactionMessages?: number;
+  /**
+   * History items fit recovery discarded to reach the composer ceiling, on any kind of turn. The
+   * caller needs this to tell a turn that fitted from one that only fitted by throwing work away.
+   */
+  omittedMessages?: number;
+  /** Messages the request carried before fit recovery, so the loss can be read as a proportion. */
+  sourceMessages?: number;
 }
 
 export interface CompileChatGptWebPromptOptions {
@@ -376,8 +383,11 @@ export function compileChatGptWebPrompt(
   if (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID && parsed._compactionRequest) {
     throw new Error("ChatGPT Luna uses rolling checkpoints and does not accept a separate compaction turn");
   }
-  if (captureLunaCheckpoint && (parsed.modelId !== CHATGPT_WEB_LUNA_MODEL_ID || parsed._compactionRequest)) {
-    throw new Error("Rolling checkpoints are supported only for normal ChatGPT Luna turns");
+  // Checkpoints were built for Luna, whose ceiling is the browser envelope rather than the model
+  // window. The composer ceiling is the same kind of wall for every other mode, and it is paid in
+  // discarded history, so the mechanism is no longer restricted by model - only by turn kind.
+  if (captureLunaCheckpoint && parsed._compactionRequest) {
+    throw new Error("Rolling checkpoints are not part of a separate compaction turn");
   }
   if (mode.localTools && !turnToken) {
     throw new Error("Tool-capable ChatGPT web mode requires a broker turn token");
@@ -425,7 +435,7 @@ export function compileChatGptWebPrompt(
     ];
   const checkpointContract = captureLunaCheckpoint
     ? [
-      "After the complete user-facing answer, append one private rolling task checkpoint for the next Luna turn.",
+      "After the complete user-facing answer, append one private rolling task checkpoint for the next turn on this task.",
       `Append the exact marker ${CHATGPT_LUNA_CHECKPOINT_MARKER} on its own line, followed by one compact plain-text checkpoint and nothing else. Do not write JSON and do not use a Markdown code fence.`,
       "Use the headings Objective:, State:, Evidence:, Decisions:, and Pending:. Put each heading on its own line and use concise dash bullets under the list headings.",
       `Keep the checkpoint at or below ${CHATGPT_LUNA_CHECKPOINT_MAX_TOKENS.toLocaleString("en-US")} tokens. Preserve concrete requirements, exact paths, commands, results, decisions, unresolved blockers, and the next useful actions.`,
@@ -474,7 +484,7 @@ export function compileChatGptWebPrompt(
       "</codex_context_json>",
       ...transportResume,
     ].join("\n");
-    return { text, images };
+    return { text, images, omittedMessages, sourceMessages: initialMessageCount };
   };
 
   const contractedMessages = withoutSupersededModelSwitchContracts(parsed.context.messages);
