@@ -43,33 +43,6 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reje
  */
 const CHATGPT_CLIENT_ABANDON_GRACE_MS = 60_000;
 
-/**
- * When fit recovery is discarding this much of a turn's history, replaying a checkpoint the model
- * wrote about that history beats replaying nothing. Below it, the history is worth more than the
- * summary: a real session kept 8 messages of 70 at its worst, which is the case this is for.
- */
-const CHATGPT_CHECKPOINT_MIN_OMITTED = 8;
-const CHATGPT_CHECKPOINT_OMITTED_FRACTION = 4;
-
-/**
- * Whether this turn is losing enough history that a summary of it beats what survives. Replacing
- * the conversation with a précis is the wrong trade for an ordinary trim - two messages of seventy
- * are not worth the other sixty-eight - and the right one once the loss is structural.
- */
-export function chatGptWebHistoryIsCollapsing(omitted: number, carried: number): boolean {
-  return omitted >= Math.max(
-    CHATGPT_CHECKPOINT_MIN_OMITTED,
-    Math.floor(carried / CHATGPT_CHECKPOINT_OMITTED_FRACTION),
-  );
-}
-
-/**
- * A tool-capable compile refuses to run without a broker token, and the pressure probe has no turn
- * to bind to. A real capability is the same length, so the measured prompt matches the one that will
- * actually be sent - the same substitution `usage.ts` makes for its estimates.
- */
-const CHATGPT_PRESSURE_PROBE_TOKEN = "turn_00000000000000000000000000000000";
-
 function abortError(): DOMException {
   return new DOMException("ChatGPT web turn aborted", "AbortError");
 }
@@ -231,51 +204,16 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
   ): ChatGptTurnRuntime => {
     const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
     const identity = extractChatGptTurnIdentity(parsed);
-    const lunaTurn = parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID;
-    const checkpointEligible = !parsed._compactionRequest && Boolean(identity.threadId && identity.turnId);
-
-    // Luna always rides the checkpoint: its ceiling is the browser envelope, not the model window.
-    // Every other mode pays for the composer ceiling in discarded history instead, and only finds
-    // out after compiling. Compiling twice to learn that costs a millisecond - it was measured at 1ms
-    // median, 35ms at worst - which buys the difference between summarising the history and losing it.
-    const pressure = !lunaTurn && checkpointEligible
-      ? compileChatGptWebPrompt(
-        parsed,
-        turnCapabilities,
-        mode.localTools ? CHATGPT_PRESSURE_PROBE_TOKEN : undefined,
-      )
-      : undefined;
-    const omitted = pressure?.omittedMessages ?? 0;
-    const carried = pressure?.sourceMessages ?? 0;
-
-    // Writing a checkpoint costs output tokens on every turn that asks for one, so it starts only
-    // once a turn has actually begun losing history - which is also when the next turn will want it.
-    const captureLunaCheckpoint = checkpointEligible && (lunaTurn || omitted > 0);
-
-    // Replacing the whole history with a summary is the right trade only against a large loss.
-    // Losing two messages out of seventy is not worth trading sixty-eight real ones for a précis.
-    const historyCollapsing = chatGptWebHistoryIsCollapsing(omitted, carried);
-    const checkpointInput = checkpointEligible && (lunaTurn || historyCollapsing)
+    const captureLunaCheckpoint = parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID
+      && !parsed._compactionRequest
+      && Boolean(identity.threadId && identity.turnId);
+    const checkpointInput = captureLunaCheckpoint
       ? lunaCheckpointStore.apply(parsed)
       : { parsed, applied: false };
     if (captureLunaCheckpoint) {
       console.info(
-        `[chatgpt-web] rolling checkpoint capture=on applied=${checkpointInput.applied}`
-        + `${checkpointInput.reason ? ` reason=${checkpointInput.reason}` : ""}`
-        + `${lunaTurn ? "" : ` omitted=${omitted}/${carried}`}`,
+        `[chatgpt-web] Luna rolling checkpoint applied=${checkpointInput.applied}${checkpointInput.reason ? ` reason=${checkpointInput.reason}` : ""}`,
       );
-      // The applied path cannot be replayed offline: it needs a stored checkpoint whose hash matches
-      // the exact parent answer. Record each decision so the trade can be read from real turns.
-      if (!lunaTurn) {
-        appendDiagnosticRecord("checkpoint.jsonl", {
-          traceId,
-          omitted,
-          carried,
-          collapsing: historyCollapsing,
-          applied: checkpointInput.applied,
-          ...(checkpointInput.reason ? { reason: checkpointInput.reason } : {}),
-        });
-      }
     }
     let capturedCheckpoint: CapturedChatGptLunaCheckpoint | undefined;
     let checkpointCaptureError: Error | undefined;
