@@ -341,8 +341,18 @@ export class ChatGptTurnSessions {
 
   retire(key: string, session: ChatGptTurnSession): boolean {
     if (this.entries.get(key) !== session) return false;
-    session.cancel();
     this.entries.delete(key);
+    session.cancel();
+    // Cancelling only starts the browser turn's unwind; the tab is released when browserOutcome
+    // settles. Record that wait the way retireAndWait does. Without it waitForRetirement reads an
+    // empty map and resolves instantly, so a reconnect builds a fresh session and re-enters the
+    // worker while the old run still holds the deterministic traceId - which the worker rejects as
+    // "Duplicate ChatGPT web browser turn", killing the very reconnect this path exists to allow.
+    const retirement = session.browserOutcome.then(() => undefined, () => undefined);
+    this.retirements.set(key, retirement);
+    void retirement.finally(() => {
+      if (this.retirements.get(key) === retirement) this.retirements.delete(key);
+    });
     return true;
   }
 
