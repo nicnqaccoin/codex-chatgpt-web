@@ -36,6 +36,13 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reje
   return { promise, resolve: resolvePromise, reject: rejectPromise };
 }
 
+/**
+ * How long a browser turn keeps running after its client goes away, so a Codex reconnect can
+ * re-attach to the work in progress instead of paying for a fresh turn. Past it, an abandoned turn
+ * is stopped rather than left generating an answer nobody will read.
+ */
+const CHATGPT_CLIENT_ABANDON_GRACE_MS = 60_000;
+
 function abortError(): DOMException {
   return new DOMException("ChatGPT web turn aborted", "AbortError");
 }
@@ -367,6 +374,22 @@ export function createChatGptWebAdapter(provider: CodexProviderConfig): Provider
         executionKey,
         () => startRuntime(parsed, environment, traceId, turnCapabilities),
       );
+      // A client that closes the stream looks the same whether the user pressed stop or the
+      // connection blipped, so the session is deliberately kept alive for a reconnect to re-attach.
+      // Nothing ever ended it in the first case: pressing stop left ChatGPT generating to the end,
+      // holding a browser tab and spending the account's quota on an answer nobody would read, until
+      // the registry's thirty minute TTL got around to it. Give the reconnect its window, then stop.
+      const abandonIfUnclaimed = (): void => {
+        const abandonedAt = Date.now();
+        setTimeout(() => {
+          if (!session.isActive()) return;
+          if (session.lastUsedAt() > abandonedAt) return;
+          chatGptTurnSessions.retire(executionKey, session);
+        }, CHATGPT_CLIENT_ABANDON_GRACE_MS);
+      };
+      if (incoming.abortSignal?.aborted) abandonIfUnclaimed();
+      else incoming.abortSignal?.addEventListener("abort", abandonIfUnclaimed, { once: true });
+
       const heartbeat = setInterval(() => emit({ type: "heartbeat" }), 10_000);
       try {
         emit({ type: "heartbeat" });
