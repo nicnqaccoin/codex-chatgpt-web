@@ -30,10 +30,16 @@ test("a chunk never ends on whitespace the composer would rewrite", () => {
   expect(/\s$/.test(first!)).toBe(false);
 });
 
-test("a whitespace run longer than the backoff keeps the original boundary", () => {
+test("a chunk ends where a whitespace run starts instead of splitting it", () => {
   const text = "d".repeat(15_000) + " ".repeat(2_000) + "e".repeat(5_000);
   const parts = chunks(text);
-  expect(parts[0]!.length).toBe(CHATGPT_PROMPT_INSERT_CHUNK_CHARS);
+  // The boundary lookback reaches back over the whole run, so the chunk stops short of the hard
+  // limit rather than ending inside the spaces. A chunk that ends on whitespace leaves that
+  // character last in the composer, where the surface rewrites it - a trailing space becomes
+  // U+00A0 - and the exact readback then fails on a prompt that arrived intact.
+  expect(parts[0]!.length).toBe(15_000);
+  expect(parts[0]!.length).toBeLessThan(CHATGPT_PROMPT_INSERT_CHUNK_CHARS);
+  expect(/\s$/.test(parts[0]!)).toBe(false);
   expect(parts.join("")).toBe(text);
 });
 
