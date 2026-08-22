@@ -201,6 +201,33 @@ export function previousResponseReplayPrefixLength(body: unknown): number {
  * Cache completed output and max_output_tokens partial output for previous_response_id replay.
  * Content-filtered incomplete and failed output are not authoritative replay history.
  */
+function turnIdOf(item: unknown): string | undefined {
+  if (!item || typeof item !== "object") return undefined;
+  const passthrough = (item as { internal_chat_message_metadata_passthrough?: unknown })
+    .internal_chat_message_metadata_passthrough;
+  if (!passthrough || typeof passthrough !== "object") return undefined;
+  const turnId = (passthrough as { turn_id?: unknown }).turn_id;
+  return typeof turnId === "string" && turnId ? turnId : undefined;
+}
+
+/**
+ * Codex stamps every item it sends with its turn identity; our own response output carries none,
+ * because we build it. That matters on a `previous_response_id` chain: the replayed prefix ends with
+ * this output, so the immediately preceding assistant answer - the parent a rolling checkpoint is
+ * keyed to - was unidentifiable, and `apply` bailed out at "no proven completed parent assistant
+ * answer" on every turn that actually needed it. The producing turn's id is exactly the identity
+ * that answer belongs to, so carry it across. Items that already declare one are left alone.
+ */
+function stampTurnIdentity(output: readonly unknown[], input: unknown): unknown[] {
+  const turnId = (Array.isArray(input) ? input : []).map(turnIdOf).findLast(id => id !== undefined);
+  if (!turnId) return [...output];
+  return output.map(item => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    if (turnIdOf(item)) return item;
+    return { ...(item as Record<string, unknown>), internal_chat_message_metadata_passthrough: { turn_id: turnId } };
+  });
+}
+
 export function rememberResponseState(
   requestBody: unknown,
   response: { id?: unknown; output?: unknown; status?: unknown; incomplete_details?: unknown },
@@ -223,7 +250,7 @@ export function rememberResponseState(
   ensureLoaded();
   setEntry(response.id, {
     createdAt: now(),
-    items: [...inputItems(request.input), ...response.output],
+    items: [...inputItems(request.input), ...stampTurnIdentity(response.output, request.input)],
   });
   pruneResponses();
   schedulePersist();
