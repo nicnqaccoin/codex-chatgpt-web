@@ -90,7 +90,19 @@ const DROPPED_IMAGE_NOTE =
 const DESKTOP_ONLY_REPLAY_BLOCKS: readonly RegExp[] = [
   /<oai-mem-citation>[\s\S]*?<\/oai-mem-citation>/g,
   /<recommended_plugins>[\s\S]*?<\/recommended_plugins>/g,
+  // The digest was already dropped here; the procedure that reads it was not, so the replay carried
+  // ~9,978 characters instructing the model to "skim the MEMORY_SUMMARY below" immediately after
+  // this filter had deleted that summary. Keeping a procedure for content that is gone is strictly
+  // worse than keeping both or dropping both, so this now spans the whole "## Memory" section
+  // through the digest, ending where the skills contract - which the model can still act on - begins.
   /\n?## What.s in Memory[\s\S]*?(?=\n<skills_instructions>)/g,
+  // The digest above was already dropped; the procedure that reads it was not, so the replay carried
+  // ~9,400 characters instructing the model to "skim the MEMORY_SUMMARY below" right after this
+  // filter had deleted that summary. Keeping a procedure for content that is gone is strictly worse
+  // than keeping both or dropping both. Either order works with the rule above: whichever runs first,
+  // the other still meets `<skills_instructions>`, which the model can act on and which stays.
+  // Codex desktop emits this section with CRLF, so both boundaries have to tolerate \r.
+  /\r?\n?## Memory\r?\n[\s\S]*?(?=\r?\n<skills_instructions>)/g,
 ];
 
 export function withoutDesktopOnlyReplayBlocks(text: string): string {
