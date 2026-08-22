@@ -159,18 +159,34 @@ function messageChars(message: CodexMessage): number {
  * under; pass `--budget-tokens` with the reported context window instead to replay the worst case,
  * the largest history Codex can still send before it must compact.
  */
-function liveContextSlice(messages: readonly CodexMessage[], budgetTokens: number): CodexMessage[] {
+interface ContextSlice {
+  readonly messages: CodexMessage[];
+  readonly available: number;
+  readonly tokensUsed: number;
+  /**
+   * The message that ended the walk. The window has to stay contiguous, so one oversized item stops
+   * it even when budget remains - and then the replay silently covers a sliver of the session while
+   * still reporting "dropped 0". Reported so that reading is impossible to mistake for "no pressure".
+   */
+  readonly blockedBy: { role: string; chars: number; tokens: number } | null;
+}
+
+function liveContextSlice(messages: readonly CodexMessage[], budgetTokens: number): ContextSlice {
   let start = messages.length;
   let tokens = 0;
+  let blockedBy: ContextSlice["blockedBy"] = null;
   while (start > 0) {
     const message = messages[start - 1]!;
     const text = typeof message.content === "string" ? message.content : JSON.stringify(message.content);
     const cost = estimateTokens(text, CHATGPT_WEB_MODEL_ID);
-    if (tokens + cost > budgetTokens) break;
+    if (tokens + cost > budgetTokens) {
+      blockedBy = { role: message.role, chars: text.length, tokens: cost };
+      break;
+    }
     tokens += cost;
     start -= 1;
   }
-  return messages.slice(start);
+  return { messages: messages.slice(start), available: messages.length, tokensUsed: tokens, blockedBy };
 }
 
 /** Counts the messages that reached ChatGPT, read back out of the compiled envelope. */
@@ -226,7 +242,8 @@ if (files.length === 0) {
 
 console.log(`context budget ${budgetTokens.toLocaleString("en-US")} tokens\n`);
 for (const file of files) {
-  const slice = liveContextSlice(messagesFromRollout(file), budgetTokens);
+  const sliced = liveContextSlice(messagesFromRollout(file), budgetTokens);
+  const slice = sliced.messages;
   if (slice.length === 0) {
     console.log(`${file}\n  no replayable messages`);
     continue;
@@ -245,8 +262,24 @@ for (const file of files) {
   const compiled = compileChatGptWebPrompt(request, PLUS_CAPABILITIES, "token-replay");
   const kept = envelopeMessageCount(compiled.text);
 
+  const coverage = (slice.length / sliced.available) * 100;
   console.log(file);
-  console.log(`  context slice   ${slice.length} messages, ${rawChars.toLocaleString("en-US")} chars`);
+  console.log(
+    `  context slice   ${slice.length}/${sliced.available} messages (${coverage.toFixed(1)}% of session), ` +
+      `${rawChars.toLocaleString("en-US")} chars, ` +
+      `${sliced.tokensUsed.toLocaleString("en-US")}/${budgetTokens.toLocaleString("en-US")} tokens`,
+  );
+  if (sliced.blockedBy && coverage < 80) {
+    console.log(
+      `  !! WINDOW CUT    stopped at a ${sliced.blockedBy.role} of ` +
+        `${sliced.blockedBy.chars.toLocaleString("en-US")} chars (~${sliced.blockedBy.tokens.toLocaleString("en-US")} tokens); ` +
+        `${(budgetTokens - sliced.tokensUsed).toLocaleString("en-US")} tokens of budget went unused.`,
+    );
+    console.log(
+      "                   Numbers below describe that sliver only - do NOT read them as \"no pressure\". " +
+        "Raise --budget-tokens to replay more of the session.",
+    );
+  }
   console.log(`  pruning         ${elidedToolResults} tool results rewritten, ${prunedChars.toLocaleString("en-US")} chars removed`);
   console.log(`  fit recovery    kept ${kept}/${slice.length}, dropped ${slice.length - kept}`);
   console.log(`  compiled prompt ${compiled.text.length.toLocaleString("en-US")} chars`);
