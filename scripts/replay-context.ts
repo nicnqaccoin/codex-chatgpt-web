@@ -21,10 +21,23 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { CHATGPT_WEB_MODEL_ID, type ChatGptWebCapabilities } from "../src/adapters/chatgpt-web/model";
 import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
-import { pruneSemanticToolResults, textFromContent } from "../src/adapters/chatgpt-web/prune";
-import { CHATGPT_WEB_MEDIUM_HIGH_AUTO_COMPACT_TOKEN_LIMIT } from "../src/chatgpt-web-models";
+import {
+  CHATGPT_DEFAULT_VERBATIM_TOOL_RESULT_MESSAGES,
+  compactToolResultsToReceipts,
+  pruneSemanticToolResults,
+  textFromContent,
+} from "../src/adapters/chatgpt-web/prune";
+import {
+  CHATGPT_WEB_MEDIUM_HIGH_AUTO_COMPACT_TOKEN_LIMIT,
+  CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT as COMPOSER_CHAR_LIMIT,
+} from "../src/chatgpt-web-models";
 import { estimateTokens } from "../src/lib/token-estimate";
-import type { CodexAssistantContentPart, CodexMessage, CodexParsedRequest } from "../src/types";
+import type {
+  CodexAssistantContentPart,
+  CodexContentPart,
+  CodexMessage,
+  CodexParsedRequest,
+} from "../src/types";
 
 // A replay must never touch the diagnostics the live bridge is writing next door.
 process.env.BUN_TEST = "1";
@@ -201,6 +214,27 @@ function envelopeMessageCount(promptText: string): number {
   }
 }
 
+/**
+ * Sizes of the tool results the verbatim window replays, at each stage the compiler applies them:
+ * semantic pruning always, then receipt compaction only once the prompt has already exceeded its
+ * budget. All three lists are index-aligned, so one window position can be read across the stages.
+ */
+function verbatimToolResults(
+  ...stages: readonly (readonly CodexMessage[])[]
+): number[][] {
+  const base = stages[0] ?? [];
+  const first = Math.max(0, base.length - CHATGPT_DEFAULT_VERBATIM_TOOL_RESULT_MESSAGES);
+  const out: number[][] = stages.map(() => []);
+  for (let index = first; index < base.length; index += 1) {
+    if (base[index]?.role !== "toolResult") continue;
+    stages.forEach((stage, stageIndex) => {
+      const message = stage[index];
+      out[stageIndex]!.push(message ? textFromContent(message.content as string | CodexContentPart[]).length : 0);
+    });
+  }
+  return out;
+}
+
 function toolResultChars(messages: readonly CodexMessage[]): number {
   return messages.reduce(
     (total, message) => (message.role === "toolResult" ? total + textFromContent(message.content).length : total),
@@ -281,6 +315,33 @@ for (const file of files) {
     );
   }
   console.log(`  pruning         ${elidedToolResults} tool results rewritten, ${prunedChars.toLocaleString("en-US")} chars removed`);
+
+  // The per-result cap is a threshold, not a kept size: a result above it is elided to a head and
+  // tail, a result below it is replayed whole. Nothing bounds the window's total, so a handful of
+  // results just under the cap can fill the composer on their own and leave fit recovery no choice
+  // but to drop the rest of the conversation. `context-trim.jsonl` only records the largest result,
+  // which cannot show that, so report the window itself.
+  const [rawWindow, prunedWindow, compactedWindow] = verbatimToolResults(
+    slice,
+    pruned,
+    compactToolResultsToReceipts(pruned),
+  );
+  if (rawWindow && rawWindow.length > 0 && prunedWindow && compactedWindow) {
+    const sum = (sizes: readonly number[]): number => sizes.reduce((total, size) => total + size, 0);
+    const finalTotal = sum(compactedWindow);
+    console.log(
+      `  verbatim window ${rawWindow.length} tool result(s) in the last ` +
+        `${CHATGPT_DEFAULT_VERBATIM_TOOL_RESULT_MESSAGES} messages` +
+        `\n                  raw ${sum(rawWindow).toLocaleString("en-US")}` +
+        ` -> pruned ${sum(prunedWindow).toLocaleString("en-US")}` +
+        ` -> receipts ${finalTotal.toLocaleString("en-US")} chars` +
+        `\n                  final sizes: ${compactedWindow.map(size => size.toLocaleString("en-US")).join(" + ")}` +
+        `${finalTotal > COMPOSER_CHAR_LIMIT
+          ? `\n  !! WINDOW OVER   ${finalTotal.toLocaleString("en-US")} chars exceeds the ${COMPOSER_CHAR_LIMIT.toLocaleString("en-US")} composer limit on its own`
+          : ""}`,
+    );
+  }
+
   console.log(`  fit recovery    kept ${kept}/${slice.length}, dropped ${slice.length - kept}`);
   console.log(`  compiled prompt ${compiled.text.length.toLocaleString("en-US")} chars`);
 }
