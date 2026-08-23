@@ -24,6 +24,8 @@ interface RunMessage {
     capabilities: ChatGptWebCapabilities;
     prepared: CompiledChatGptWebPrompt;
     captureLunaCheckpoint?: boolean;
+    /** Where to resume; absent means the turn runs in a temporary chat, as it always has. */
+    conversationResumeUrl?: string;
   };
 }
 
@@ -143,6 +145,14 @@ async function run(message: RunMessage): Promise<void> {
     }),
     onCommentary: (text, continuation) => writeProtocol({ type: "event", id: message.id, event: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
     onTextDelta: text => writeProtocol({ type: "event", id: message.id, event: "text", text }),
+    // The resume url crosses the process boundary as a plain string; the callback cannot, so the
+    // helper reports the conversation it actually landed on back as an event, like the deltas above.
+    ...(message.turn.conversationResumeUrl ? {
+      conversation: {
+        resumeUrl: message.turn.conversationResumeUrl,
+        onEstablished: (url: string) => writeProtocol({ type: "event", id: message.id, event: "conversation", url }),
+      },
+    } : {}),
     ...(message.turn.captureLunaCheckpoint ? {
       captureLunaCheckpoint: true,
       onLunaCheckpoint: captured => writeProtocol({

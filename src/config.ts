@@ -456,6 +456,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       solAvailable: config.solAvailable,
       proAvailable: config.proAvailable,
       autoApproveToolCalls: config.autoApproveToolCalls,
+      persistentConversation: config.persistentConversation === true,
     },
   };
 }

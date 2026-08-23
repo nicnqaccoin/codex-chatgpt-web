@@ -21,6 +21,7 @@ type HelperMessage =
   | { type: "ready" }
   | { type: "event"; id: string; event: "heartbeat" | "reasoning" | "commentary" | "text"; text?: string; continuation?: boolean }
   | { type: "event"; id: string; event: "luna_checkpoint"; checkpoint: ChatGptLunaCheckpoint; answerHash: string }
+  | { type: "event"; id: string; event: "conversation"; url: string }
   | { type: "result"; id: string; text: string }
   | {
       type: "error";
@@ -56,6 +57,14 @@ function parseHelperMessage(line: string): HelperMessage {
         checkpoint: parseChatGptLunaCheckpoint(message.checkpoint),
         answerHash: message.answerHash,
       };
+    }
+    if (event === "conversation") {
+      // The helper reports where the turn landed so the next turn can resume it; a bad URL
+      // would send the following turn somewhere unknown, so it is checked rather than trusted.
+      if (typeof message.url !== "string" || !message.url.startsWith("https://chatgpt.com/")) {
+        throw new Error("Launcher browser helper conversation url is invalid");
+      }
+      return { type: "event", id: message.id, event, url: message.url };
     }
     const text = message.text;
     const continuation = message.continuation;
@@ -189,6 +198,7 @@ export class LauncherBrowserHelperClient {
             capabilities: turn.capabilities,
             prepared: { text: prepared.text, images: prepared.images } satisfies CompiledChatGptWebPrompt,
             ...(turn.captureLunaCheckpoint ? { captureLunaCheckpoint: true } : {}),
+            ...(turn.conversation?.resumeUrl ? { conversationResumeUrl: turn.conversation.resumeUrl } : {}),
           },
         }).catch(error => this.finishWithError(turn.traceId, error instanceof Error ? error : new Error(String(error))));
       });
@@ -307,6 +317,7 @@ export class LauncherBrowserHelperClient {
     if (!pending) return;
     if (message.type === "event") {
       if (message.event === "heartbeat") pending.turn.onHeartbeat?.();
+      else if (message.event === "conversation") pending.turn.conversation?.onEstablished?.(message.url);
       else if (message.event === "luna_checkpoint") {
         if (!pending.turn.captureLunaCheckpoint || !pending.turn.onLunaCheckpoint) {
           this.finishWithError(message.id, new Error("Launcher browser helper emitted an unexpected Luna checkpoint"));
