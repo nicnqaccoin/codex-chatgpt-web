@@ -115,11 +115,17 @@ const settleChatGptUi = (): Promise<void> => (
 export const CHATGPT_MENU_ANIMATION_SETTLE_MS = 500;
 
 /** Overlapping navigations abort each other; the target never changes, so a bounded retry is safe. */
-export /** A resumed transcript arrives by fetch after the shell; these bound the wait for it. */
+/** A resumed transcript arrives by fetch after the shell; these bound the wait for it. */
 const CHATGPT_RESUMED_TRANSCRIPT_STABLE_MS = 750;
 const CHATGPT_RESUMED_TRANSCRIPT_TIMEOUT_MS = 20_000;
 
-const CHATGPT_NAVIGATION_ABORT_RETRIES = 2;
+/**
+ * An overlapping navigation makes Chromium abort this one before it reaches the network, so the
+ * request never started and retrying is safe. Two was enough while every turn opened the temporary
+ * chat url; rotating to a persistent chat navigates to the root instead, which aborted six times in
+ * a row and killed a turn outright.
+ */
+export const CHATGPT_NAVIGATION_ABORT_RETRIES = 5;
 
 const settleChatGptMenuAnimation = (): Promise<void> => (
   new Promise(resolveSettle => setTimeout(resolveSettle, CHATGPT_MENU_ANIMATION_SETTLE_MS))
