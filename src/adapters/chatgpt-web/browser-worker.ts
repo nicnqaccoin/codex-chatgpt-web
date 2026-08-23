@@ -149,6 +149,30 @@ export class ChatGptPromptAttachmentIntegrityError extends Error {
   }
 }
 
+/**
+ * Both of these fail before anything reaches ChatGPT - the composer never accepted the text, or the
+ * navigation was aborted before it reached the network - so running the whole turn again has no side
+ * effect. Left unclassified they were never retried at all: thirteen occurrences across three days,
+ * not one of them recovered, every one a dead turn. The turn retry budget bounds the repetition.
+ */
+export function chatGptPromptAttachmentRetryable(error: Error): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(error.message, {
+    status: 502,
+    errorType: "server_error",
+    code: "prompt_attachment_incomplete",
+    retryable: true,
+  });
+}
+
+export function chatGptNavigationAbortedRetryable(error: Error): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(error.message, {
+    status: 502,
+    errorType: "server_error",
+    code: "navigation_aborted",
+    retryable: true,
+  });
+}
+
 const chatGptRateLimitDialog = (page: Page): Locator => page.locator('[role="dialog"]')
   .filter({ hasText: /Too many requests/i })
   .filter({ hasText: /making requests too quickly/i })
@@ -1394,7 +1418,10 @@ export class ChatGptBrowserWorker {
           break;
         } catch (error) {
           const aborted = error instanceof Error && error.message.includes("net::ERR_ABORTED");
-          if (!aborted || attempt >= CHATGPT_NAVIGATION_ABORT_RETRIES) throw error;
+          if (!aborted) throw error;
+          if (attempt >= CHATGPT_NAVIGATION_ABORT_RETRIES) {
+            throw chatGptNavigationAbortedRetryable(error instanceof Error ? error : new Error(String(error)));
+          }
           await captureDiagnostic?.(`temporary-chat-navigation-aborted-${attempt + 1}`);
           await settleChatGptUi();
         }
@@ -1811,7 +1838,8 @@ export class ChatGptBrowserWorker {
         );
         return;
       } catch (error) {
-        if (!retryAvailable || !(error instanceof ChatGptPromptAttachmentIntegrityError)) throw error;
+        if (!(error instanceof ChatGptPromptAttachmentIntegrityError)) throw error;
+        if (!retryAvailable) throw chatGptPromptAttachmentRetryable(error);
         retryAvailable = false;
         const evidence = await this.currentSubmissionEvidence(
           page,

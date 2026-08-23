@@ -2,6 +2,8 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
 import { CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
+import { chatGptNavigationAbortedRetryable } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
@@ -1957,4 +1959,42 @@ test("a resumed conversation waits for its transcript before the baseline is rea
   // A conversation is only resumed after a turn completed inside it, so an empty transcript means the
   // page never loaded what this turn is about to append to. Failing beats appending onto nothing.
   await expect(run([0], 30_000)).rejects.toThrow("did not render the resumed conversation transcript");
+});
+
+/**
+ * A composer that never accepted the text and a navigation aborted before it reached the network
+ * both fail with nothing delivered to ChatGPT, so the turn can simply run again. Thirteen of these
+ * were recorded across three days and not one recovered, because unclassified means never retried.
+ */
+test("failures that never reached ChatGPT are retryable rather than fatal", async () => {
+  const attachWithRetry = (ChatGptBrowserWorker.prototype as unknown as {
+    attachPromptWithCompactionRetry(...args: unknown[]): Promise<void>;
+  }).attachPromptWithCompactionRetry;
+
+  const integrity = new ChatGptPromptAttachmentIntegrityError(
+    "ChatGPT composer did not commit a complete prompt insertion chunk (expectedChars=1, actualChars=2)",
+  );
+  const context = { attachPrompt: async () => { throw integrity; } };
+
+  // compaction=false leaves no in-place retry, which is exactly when the turn used to die outright.
+  const failure = await attachWithRetry.call(context, {}, "prompt", true, false, {}, undefined, undefined, false)
+    .then(() => undefined, (error: unknown) => error);
+  expect(failure).toBeInstanceOf(ChatGptWebAdapterError);
+  expect((failure as ChatGptWebAdapterError).retryable).toBeTrue();
+  expect((failure as ChatGptWebAdapterError).code).toBe("prompt_attachment_incomplete");
+  expect((failure as Error).message).toContain("did not commit a complete prompt insertion chunk");
+
+  // An error from somewhere else must keep its own identity instead of being relabelled retryable.
+  const other = new Error("connector menu opened but exposed no row");
+  const passthrough = await attachWithRetry
+    .call({ attachPrompt: async () => { throw other; } }, {}, "p", true, false, {}, undefined, undefined, false)
+    .then(() => undefined, (error: unknown) => error);
+  expect(passthrough).toBe(other);
+});
+
+test("an aborted navigation is retryable once its in-place attempts are spent", () => {
+  const classified = chatGptNavigationAbortedRetryable(new Error("page.goto: net::ERR_ABORTED"));
+  expect(classified).toBeInstanceOf(ChatGptWebAdapterError);
+  expect(classified.retryable).toBeTrue();
+  expect(classified.code).toBe("navigation_aborted");
 });
