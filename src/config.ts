@@ -78,6 +78,16 @@ export interface AppConfig {
   solAvailable: boolean;
   proAvailable: boolean;
   autoApproveToolCalls: boolean;
+  /**
+   * Reuse one ChatGPT conversation per Codex session and send only what changed, instead of opening
+   * a fresh Temporary Chat and replaying everything. The instruction contract is ~21% of the
+   * composer budget and does not change between turns, so a fresh chat pays for it again every
+   * time; on a measured 228-message session that cost 53 dropped messages.
+   *
+   * Optional and off by default: absent means today's behaviour exactly, so an existing config
+   * stays valid and the switch is also the way to A/B the two transports.
+   */
+  persistentConversation?: boolean;
   controlToken: string;
   runtimeCommand: string[];
   acknowledgedUnofficialAt?: string;
@@ -339,6 +349,11 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (typeof parsed.headed !== "boolean") throw new Error(`Invalid headed in ${path}`);
   if (typeof parsed.autoApproveToolCalls !== "boolean") {
     throw new Error(`Invalid autoApproveToolCalls in ${path}`);
+  }
+  // Absent is the default and must stay valid: every config written before this flag existed omits
+  // it, and omitting it has to mean the transport behaves exactly as it did then.
+  if (parsed.persistentConversation !== undefined && typeof parsed.persistentConversation !== "boolean") {
+    throw new Error(`Invalid persistentConversation in ${path}`);
   }
   const requiredStrings: Array<keyof AppConfig> = [
     "appName", "chromeExecutablePath", "storageStatePath", "brokerSocketPath", "controlToken",
