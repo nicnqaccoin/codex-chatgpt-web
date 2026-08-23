@@ -698,9 +698,14 @@ export function createChatGptWebAdapter(
         // A turn the user interrupted arrives here as an AbortError, and it is not a failure. Every
         // interruption would otherwise be filed as the expensive unclassified kind and the log would
         // read as constant breakage while the user was simply steering.
+        // A stage timeout also arrives as an AbortError, so filing neither left four failed attempts
+        // of one turn with no record at all, and the log read as a clean run for one that visibly
+        // struggled. Record both and mark which is which, so an interruption still does not read as
+        // breakage while a timeout stops being invisible.
         const aborted = error instanceof Error && error.name === "AbortError";
-        if (!aborted) appendDiagnosticRecord("turn-failures.jsonl", {
+        appendDiagnosticRecord("turn-failures.jsonl", {
           traceId,
+          ...(aborted ? { aborted: true } : {}),
           mode: session.runtime.mode,
           classified: error instanceof ChatGptWebAdapterError,
           retryable: error instanceof ChatGptWebAdapterError ? error.retryable : false,
