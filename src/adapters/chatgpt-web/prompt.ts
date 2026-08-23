@@ -321,6 +321,13 @@ function messageEnvelope(
 const COMPACTION_STALL_WINDOW_MS = 600_000;
 const COMPACTION_STALL_SAMPLES = 3;
 const COMPACTION_STALL_SPREAD = 0.03;
+/**
+ * A stall only means livelock when compaction has something left to reduce. The livelock above sat
+ * at 86% of the limit; a session resting at half of it has simply reached its floor, which is what
+ * a session full of images does - Codex counts them and keeps asking, while the text cannot shrink
+ * further. Treating that as fatal killed a task that was making real progress at 54,281 bytes.
+ */
+const COMPACTION_STALL_MIN_PRESSURE = 0.8;
 
 let compactionPromptSizes: { at: number; bytes: number }[] = [];
 
@@ -329,7 +336,16 @@ export function resetCompactionStallTracking(): void {
   compactionPromptSizes = [];
 }
 
-export function noteCompactionPromptSize(bytes: number, now = Date.now()): void {
+export function noteCompactionPromptSize(
+  bytes: number,
+  composerCharLimit: number | undefined,
+  now = Date.now(),
+): void {
+  // No composer limit means no pressure to measure a stall against, so there is nothing to declare.
+  if (composerCharLimit === undefined || bytes < composerCharLimit * COMPACTION_STALL_MIN_PRESSURE) {
+    compactionPromptSizes = [];
+    return;
+  }
   compactionPromptSizes = compactionPromptSizes.filter(sample => now - sample.at < COMPACTION_STALL_WINDOW_MS);
   compactionPromptSizes.push({ at: now, bytes });
   if (compactionPromptSizes.length < COMPACTION_STALL_SAMPLES) return;
@@ -567,7 +583,7 @@ export function compileChatGptWebPrompt(
   if (!parsed._compactionRequest) return compiled;
 
   const encodedBytes = chatGptPromptJsonBytes(compiled.text);
-  noteCompactionPromptSize(encodedBytes);
+  noteCompactionPromptSize(encodedBytes, composerCharLimit);
   if (exceedsBudget()) {
     throw new Error(
       `ChatGPT Web compaction prompt still requires ${encodedBytes.toLocaleString("en-US")} JSON bytes after all older history was trimmed; the final compaction instruction alone exceeds the browser compaction budget`,
