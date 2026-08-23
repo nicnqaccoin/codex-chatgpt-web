@@ -182,6 +182,7 @@ test("active composer resolution waits for exactly one visible editor", async ()
     first: () => composer,
   };
   const page = {
+    url: () => "https://chatgpt.com/",
     locator: () => ({
       filter: (options: { visible: boolean }) => {
         expect(options).toEqual({ visible: true });
@@ -261,6 +262,7 @@ test("large read-only context is inserted as contiguous bounded edits before exa
     focus: async () => { calls.push(["focus"]); },
   };
   const page = {
+    url: () => "https://chatgpt.com/",
     keyboard: {
       insertText: async (value: string) => { calls.push(["insertText", value]); },
       press: async (value: string) => { calls.push(["press", value]); },
@@ -307,6 +309,7 @@ test("multi-chunk prompt insertion repairs a drifted Lexical caret after each ex
   let attached = "";
   let caret = 0;
   const page = {
+    url: () => "https://chatgpt.com/",
     keyboard: {
       insertText: async (value: string) => {
         attached = `${attached.slice(0, caret)}${value}${attached.slice(caret)}`;
@@ -346,6 +349,7 @@ test("prompt insertion avoids a native edit boundary inside a text token", async
   let attached = "";
   let sourceOffset = 0;
   const page = {
+    url: () => "https://chatgpt.com/",
     keyboard: {
       insertText: async (value: string) => {
         inserted.push(value);
@@ -440,6 +444,7 @@ test("prompt insertion never sends the six-figure native edit that rewrites the 
   let caret = 0;
   const nativeEditSizes: number[] = [];
   const page = {
+    url: () => "https://chatgpt.com/",
     keyboard: {
       insertText: async (value: string) => {
         nativeEditSizes.push(value.length);
@@ -496,6 +501,7 @@ test("the real compaction envelope survives simulated caret drift at every bound
   let caret = 0;
   let simulatedDrifts = 0;
   const page = {
+    url: () => "https://chatgpt.com/",
     keyboard: {
       insertText: async (value: string) => {
         attached = `${attached.slice(0, caret)}${value}${attached.slice(caret)}`;
@@ -524,6 +530,7 @@ test("prompt chunks never split a UTF-16 surrogate pair", async () => {
   const prompt = `${"x".repeat(CHATGPT_PROMPT_INSERT_CHUNK_CHARS - 1)}😀tail`;
   const inserted: string[] = [];
   const page = {
+    url: () => "https://chatgpt.com/",
     keyboard: {
       insertText: async (value: string) => { inserted.push(value); },
     },
@@ -546,6 +553,7 @@ test("prompt insertion stops after its stage is aborted before another native ed
   const controller = new AbortController();
   const inserted: string[] = [];
   const page = {
+    url: () => "https://chatgpt.com/",
     keyboard: {
       insertText: async (value: string) => {
         inserted.push(value);
@@ -632,6 +640,7 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
     },
   };
   const page = {
+    url: () => "https://chatgpt.com/",
     viewportSize: () => ({ width: 1_280, height: 900 }),
     mouse: {
       click: async () => {
@@ -711,6 +720,7 @@ test("connector selection moves highlight to the exact hidden-viewport row befor
   const initialComposer = { fill: async () => {}, focus: async () => {}, pressSequentially: async () => {} };
   const selectedComposer = { selected: true };
   const page = {
+    url: () => "https://chatgpt.com/",
     getByText: () => ({ exactConnectorLabel: true }),
     locator: () => menuRows,
     keyboard: {
@@ -768,6 +778,7 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
     },
   };
   const page = {
+    url: () => "https://chatgpt.com/",
     viewportSize: () => ({ width: 1_280, height: 900 }),
     mouse: { click: async () => { selected = true; calls.push("activate"); } },
     getByText: () => ({ exactConnectorLabel: true }),
@@ -841,6 +852,7 @@ test("connector verification preserves the host-refreshed catalog evidence", asy
   };
   const selectedComposer = { selected: true };
   const page = {
+    url: () => "https://chatgpt.com/",
     reload: async () => { calls.push("reload"); },
     getByText: () => ({ exactConnectorLabel: true }),
     locator: () => menuRows,
@@ -911,6 +923,7 @@ test("connector catalog refresh stays fail-closed for absent, legacy, and exact 
   const run = async (visibleRows: string[]) => {
     let now = realDateNow();
     const page = {
+      url: () => "https://chatgpt.com/",
       viewportSize: () => ({ width: 1_280, height: 900 }),
       getByText: () => ({ exactConnectorLabel: true }),
       locator: () => ({
@@ -953,6 +966,67 @@ test("connector catalog refresh stays fail-closed for absent, legacy, and exact 
   await expect(run([CHATGPT_CONNECTOR_NAME])).rejects.toThrow("exact row was not visible");
 });
 
+/**
+ * ChatGPT stops offering a connector in the mention menu once the conversation already runs through
+ * it, while still routing later messages to it. Resuming a conversation therefore has to accept an
+ * absent menu row - but only on the evidence that this conversation has turns in it already, so a
+ * fresh chat keeps failing closed exactly as above.
+ */
+test("a resumed conversation inherits its connector instead of failing on the absent menu row", async () => {
+  const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
+    selectConnector(page: unknown, capture?: unknown, refresh?: boolean): Promise<unknown>;
+  }).selectConnector;
+  const timeout = new Error("menu timeout");
+  timeout.name = "TimeoutError";
+  const realDateNow = Date.now;
+  const checkpoints: string[] = [];
+  const inheritedComposer = {
+    inherited: true,
+    fill: async () => {},
+    focus: async () => {},
+    pressSequentially: async () => {},
+  };
+
+  const run = async (url: string, userTurns: number) => {
+    let now = realDateNow();
+    const page = {
+      url: () => url,
+      viewportSize: () => ({ width: 1_280, height: 900 }),
+      getByText: () => ({ exactConnectorLabel: true }),
+      locator: () => ({
+        count: async () => userTurns,
+        filter: (options: { has?: unknown; visible?: boolean }) => options.visible
+          ? { allInnerTexts: async () => [] }
+          : {
+              waitFor: async () => {
+                now += 20_001;
+                throw timeout;
+              },
+            },
+      }),
+    };
+    Date.now = () => now;
+    try {
+      return await selectConnector.call({
+        config: { appName: CHATGPT_CONNECTOR_NAME },
+        activeComposer: async () => inheritedComposer,
+        connectorIsSelected: async () => false,
+        connectorMentionRowTitles: async () => [],
+        connectorMentionFailure: async () => "menu absent",
+      }, page, async (checkpoint: string) => { checkpoints.push(checkpoint); }, true);
+    } finally {
+      Date.now = realDateNow;
+    }
+  };
+
+  expect(await run("https://chatgpt.com/c/6a8ac7b4-4000", 1)).toBe(inheritedComposer);
+  expect(checkpoints).toContain("connector-inherited");
+
+  // No turns yet means nothing can have bound the connector, so there is nothing to inherit.
+  await expect(run("https://chatgpt.com/c/6a8ac7b4-4000", 0)).rejects.toThrow("menu absent");
+  await expect(run("https://chatgpt.com/", 1)).rejects.toThrow("menu absent");
+});
+
 test("tool-capable prompts use the shared Playwright connector selection before inserting context", async () => {
   const calls: Array<[string, string?]> = [];
   let selected = false;
@@ -978,6 +1052,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
     pressSequentially: async (value: string) => { calls.push(["type", value]); },
   };
   const page = {
+    url: () => "https://chatgpt.com/",
     viewportSize: () => ({ width: 1_280, height: 900 }),
     mouse: { click: async () => { selected = true; calls.push(["selectConnector"]); } },
     getByText: () => ({ exactConnectorLabel: true }),
@@ -1078,6 +1153,7 @@ test("image attachment readiness uses exact file tiles and not localized remove-
     },
   };
   const page = {
+    url: () => "https://chatgpt.com/",
     locator: (selector: string) => {
       if (selector === 'input[data-testid="upload-photos-input"]') return input;
       if (selector === '[role="alert"]') {

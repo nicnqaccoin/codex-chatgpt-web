@@ -907,6 +907,17 @@ export function chatGptPromptFilePayloads(
   return chatGptImageFilePayloads(prompt.images);
 }
 
+/**
+ * ChatGPT binds a connector to the conversation rather than to each message: once a conversation has
+ * run through one, the mention menu stops offering it and later messages keep using it anyway. Only a
+ * conversation that already holds turns can have that binding, so this is evidence rather than an
+ * assumption - a fresh chat can never take this path.
+ */
+export async function chatGptConversationOwnsConnector(page: Page): Promise<boolean> {
+  if (!page.url().includes("chatgpt.com/c/")) return false;
+  return await page.locator(CHATGPT_USER_TURN_SELECTOR).count() > 0;
+}
+
 export class ChatGptBrowserWorker {
   static forProvider(provider: CodexProviderConfig): ChatGptBrowserWorker {
     const config = resolveBrowserConfig(provider);
@@ -1549,7 +1560,10 @@ export class ChatGptBrowserWorker {
     const appResult = menuRows.filter({
       has: page.getByText(this.config.appName, { exact: true }),
     });
-    const menuDeadline = Date.now() + 20_000;
+    // A conversation that already owns the connector will never offer it again, so waiting the full
+    // budget on every resumed turn would only add twenty seconds to each one.
+    const inheritable = await chatGptConversationOwnsConnector(page);
+    const menuDeadline = Date.now() + (inheritable ? 4_000 : 20_000);
     let triggerAttempts = 0;
     let firstMenuCaptured = false;
     for (;;) {
@@ -1579,11 +1593,15 @@ export class ChatGptBrowserWorker {
             || LEGACY_CHATGPT_CONNECTOR_NAMES.some(name => visibleRows.includes(name))
           );
         if (knownIdentityMismatch) {
+          if (inheritable) {
+            await captureDiagnostic?.("connector-inherited");
+            return await this.activeComposer(page);
+          }
           await captureDiagnostic?.("connector-menu-missing");
           throw new Error(await this.connectorMentionFailure(menuRows, triggerAttempts));
         }
         if (Date.now() >= menuDeadline) {
-          if (catalogRefreshAvailable && visibleRows.length > 0) {
+          if (!inheritable && catalogRefreshAvailable && visibleRows.length > 0) {
             if (!visibleRows.includes(this.config.appName)) {
               throw new ChatGptConnectorCatalogStaleError(
                 this.config.appName,
@@ -1591,6 +1609,10 @@ export class ChatGptBrowserWorker {
                 triggerAttempts,
               );
             }
+          }
+          if (inheritable) {
+            await captureDiagnostic?.("connector-inherited");
+            return await this.activeComposer(page);
           }
           await captureDiagnostic?.("connector-menu-missing");
           throw new Error(await this.connectorMentionFailure(menuRows, triggerAttempts));
