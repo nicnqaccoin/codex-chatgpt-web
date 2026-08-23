@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   ChatGptConversationViews,
   chatGptConversationDelta,
+  chatGptConversationViews,
   chatGptMessageSignatures,
 } from "../src/adapters/chatgpt-web/conversation-delta";
 import type { CodexMessage } from "../src/types";
@@ -93,6 +94,34 @@ test("views are remembered per session and dropped on rotation", () => {
   expect(views.get("session_b")).toBeUndefined();
 
   views.forget("session_a");
+  expect(views.get("session_a")).toBeUndefined();
+  expect(views.size()).toBe(0);
+});
+
+/**
+ * The bug this guards against: the views lived inside createChatGptWebAdapter, and the HTTP bridge
+ * builds one adapter per request. Every turn therefore started with an empty map, never found the
+ * conversation the previous turn had established, and rotated into a brand new chat - which looked
+ * exactly like the feature being switched off.
+ */
+test("the shared views outlive any single adapter", () => {
+  const messages = [user("first")];
+  chatGptConversationViews.forget("session_shared");
+  chatGptConversationViews.remember("session_shared", "conv_shared", chatGptMessageSignatures(messages));
+  try {
+    expect(chatGptConversationViews.get("session_shared")?.conversationId).toBe("conv_shared");
+  } finally {
+    chatGptConversationViews.forget("session_shared");
+  }
+});
+
+test("a view older than its ttl is dropped rather than resuming a stale conversation", () => {
+  let clock = 1_000_000;
+  const views = new ChatGptConversationViews(() => clock, 60_000);
+  views.remember("session_a", "conv_a", chatGptMessageSignatures([user("first")]));
+  clock += 59_000;
+  expect(views.get("session_a")?.conversationId).toBe("conv_a");
+  clock += 2_000;
   expect(views.get("session_a")).toBeUndefined();
   expect(views.size()).toBe(0);
 });

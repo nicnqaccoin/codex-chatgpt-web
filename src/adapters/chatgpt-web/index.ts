@@ -8,10 +8,11 @@ import { ChatGptWebAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker, type BrowserTurn } from "./browser-worker";
 import { CHATGPT_NEW_CHAT_URL } from "../../chatgpt-session";
 import {
-  ChatGptConversationViews,
+  chatGptConversationViews,
   chatGptConversationDelta,
   chatGptMessageSignatures,
 } from "./conversation-delta";
+import { textFromContent } from "./prune";
 import { appendDiagnosticRecord } from "./diagnostics-log";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./environment";
 import { repairMissingFinalArtifactReference } from "./final-artifacts";
@@ -226,7 +227,6 @@ export function createChatGptWebAdapter(
       ? resolve(expandUserPath(provider.chatgptWeb.lunaCheckpointStatePath))
       : undefined,
   );
-  const conversationViews = new ChatGptConversationViews();
   const currentUsageInput = (parsed: CodexParsedRequest): CodexParsedRequest => (
     parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID && !parsed._compactionRequest
       ? lunaCheckpointStore.apply(parsed).parsed
@@ -322,10 +322,10 @@ export function createChatGptWebAdapter(
       const sessionKey = `${executionNamespace}:${identity.threadId}`;
       const messages = checkpointInput.parsed.context.messages;
       const signatures = chatGptMessageSignatures(messages);
-      const view = conversationViews.get(sessionKey);
+      const view = chatGptConversationViews.get(sessionKey);
       const delta = chatGptConversationDelta(view, messages);
       const remember = (conversationUrl: string): void => {
-        conversationViews.remember(sessionKey, conversationUrl, signatures);
+        chatGptConversationViews.remember(sessionKey, conversationUrl, signatures);
       };
       if (delta.kind === "append" && view) {
         promptInput = {
@@ -333,12 +333,32 @@ export function createChatGptWebAdapter(
           context: { ...checkpointInput.parsed.context, messages: delta.messages },
         };
         conversation = { resumeUrl: view.conversationId, onEstablished: remember };
+        appendDiagnosticRecord("conversation.jsonl", {
+          kind: "append",
+          seenMessages: view.signatures.length,
+          totalMessages: messages.length,
+          sentMessages: delta.messages.length,
+        });
       } else {
         // Rotation is the safety valve, not a failure: the worst case is one full replay, which is
         // what every turn costs today.
-        conversationViews.forget(sessionKey);
+        chatGptConversationViews.forget(sessionKey);
         conversation = { resumeUrl: CHATGPT_NEW_CHAT_URL, onEstablished: remember };
         if (delta.kind === "rotate") {
+          // The reason only ever reached stdout, which the launcher discards, so a rotation that
+          // should not have happened left nothing behind to diagnose. Record it instead.
+          const diverged = delta.divergedAt === undefined ? undefined : messages[delta.divergedAt];
+          appendDiagnosticRecord("conversation.jsonl", {
+            kind: "rotate",
+            reason: delta.reason,
+            seenMessages: view?.signatures.length ?? 0,
+            totalMessages: messages.length,
+            ...(delta.divergedAt === undefined ? {} : {
+              divergedAt: delta.divergedAt,
+              divergedRole: diverged?.role,
+              divergedChars: textFromContent(diverged?.content as never).length,
+            }),
+          });
           console.info(
             `[chatgpt-web] conversation rotated (${delta.reason}`
             + `${delta.divergedAt === undefined ? "" : `, divergedAt=${delta.divergedAt}`})`,
