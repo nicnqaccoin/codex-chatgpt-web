@@ -204,6 +204,44 @@ function assistantItemText(value: unknown): string | undefined {
   return text.trim() ? text : undefined;
 }
 
+/** Which gate in `apply` decided the outcome, so a failure names its own step. */
+export type ChatGptCheckpointGate = "identity" | "parent" | "store" | "sourceTurn" | "currentTurn";
+
+export interface ChatGptCheckpointApplication {
+  parsed: CodexParsedRequest;
+  applied: boolean;
+  reason?: string;
+  gate?: ChatGptCheckpointGate;
+  detail?: Record<string, unknown>;
+}
+
+/**
+ * What the parent lookup saw. A checkpoint is keyed to the exact assistant answer it summarises, so
+ * "no parent" has several distinct causes that the reason string alone cannot separate: no current
+ * turn in the input at all, a boundary at the very start, or a replayed prefix whose items declare
+ * no turn identity.
+ */
+function parentLookupDetail(parsed: CodexParsedRequest, turnId: string): Record<string, unknown> {
+  const body = record(parsed._rawBody);
+  const input = Array.isArray(body?.input) ? body.input : undefined;
+  if (!input) return { input: false };
+  const boundary = currentTurnBoundary(parsed, input, turnId);
+  let assistantsBefore = 0;
+  let identifiedBefore = 0;
+  for (let index = (boundary ?? 0) - 1; index >= 0; index -= 1) {
+    if (!assistantItemText(input[index])) continue;
+    assistantsBefore += 1;
+    if (itemTurnId(input[index])) identifiedBefore += 1;
+  }
+  return {
+    inputItems: input.length,
+    replayPrefixLen: parsed._replayPrefixLen ?? 0,
+    boundary: boundary ?? -1,
+    assistantsBeforeBoundary: assistantsBefore,
+    identifiedAssistantsBeforeBoundary: identifiedBefore,
+  };
+}
+
 function parentAssistantAnswer(
   parsed: CodexParsedRequest,
   turnId: string,
@@ -268,23 +306,67 @@ export class ChatGptLunaCheckpointStore {
     private readonly now: () => number = Date.now,
   ) {}
 
-  apply(parsed: CodexParsedRequest): { parsed: CodexParsedRequest; applied: boolean; reason?: string } {
+  apply(parsed: CodexParsedRequest): ChatGptCheckpointApplication {
     const identity = extractChatGptTurnIdentity(parsed);
-    if (!identity.threadId || !identity.turnId) return { parsed, applied: false, reason: "missing native thread identity" };
+    if (!identity.threadId || !identity.turnId) {
+      return {
+        parsed,
+        applied: false,
+        reason: "missing native thread identity",
+        gate: "identity",
+        detail: { threadId: Boolean(identity.threadId), turnId: Boolean(identity.turnId) },
+      };
+    }
     const parent = parentAssistantAnswer(parsed, identity.turnId);
-    if (!parent) return { parsed, applied: false, reason: "no proven completed parent assistant answer" };
+    if (!parent) {
+      // Every recorded failure has stopped here, so this gate reports what it saw rather than only
+      // that it failed: a boundary of -1 means the current turn was never located, while a boundary
+      // with no identified assistant ahead of it means the replayed prefix ends in output that
+      // declares no turn of its own.
+      return {
+        parsed,
+        applied: false,
+        reason: "no proven completed parent assistant answer",
+        gate: "parent",
+        detail: parentLookupDetail(parsed, identity.turnId),
+      };
+    }
 
     const parentHash = hashChatGptLunaAnswer(parent.answer);
     const stored = this.get(identity.threadId, parentHash);
-    if (!stored) return { parsed, applied: false, reason: "no checkpoint for the exact parent answer" };
+    if (!stored) {
+      return {
+        parsed,
+        applied: false,
+        reason: "no checkpoint for the exact parent answer",
+        gate: "store",
+        detail: {
+          parentAnswerChars: parent.answer.length,
+          parentHashPrefix: parentHash.slice(0, 12),
+          storedForThread: this.countForThread(identity.threadId),
+        },
+      };
+    }
     if (stored.sourceTurnId !== parent.turnId) {
-      return { parsed, applied: false, reason: "checkpoint source turn does not match the exact parent answer" };
+      return {
+        parsed,
+        applied: false,
+        reason: "checkpoint source turn does not match the exact parent answer",
+        gate: "sourceTurn",
+        detail: { storedSourceTurnId: stored.sourceTurnId, parentTurnId: parent.turnId },
+      };
     }
 
     const currentInput = currentTurnInput(parsed, identity.turnId);
     const body = record(parsed._rawBody);
     if (!currentInput || !body) {
-      return { parsed, applied: false, reason: "current native turn boundary is unavailable" };
+      return {
+        parsed,
+        applied: false,
+        reason: "current native turn boundary is unavailable",
+        gate: "currentTurn",
+        detail: { currentInput: Boolean(currentInput), rawBody: Boolean(body) },
+      };
     }
 
     const checkpointItem = {
@@ -340,6 +422,21 @@ export class ChatGptLunaCheckpointStore {
     this.load();
     this.prune();
     return this.checkpoints.get(checkpointKey(threadId, answerHash));
+  }
+
+  /**
+   * How many checkpoints this thread holds, whatever answer they are keyed to. A store miss means
+   * something different when the thread has none - capture never ran - than when it has several and
+   * the parent answer simply hashes to none of them.
+   */
+  private countForThread(threadId: string): number {
+    this.load();
+    this.prune();
+    let count = 0;
+    for (const stored of this.checkpoints.values()) {
+      if (stored.threadId === threadId) count += 1;
+    }
+    return count;
   }
 
   private prune(): void {

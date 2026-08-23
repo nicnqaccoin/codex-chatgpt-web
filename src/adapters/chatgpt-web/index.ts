@@ -269,6 +269,9 @@ export function createChatGptWebAdapter(
       );
       // The applied path cannot be replayed offline: it needs a stored checkpoint whose hash matches
       // the exact parent answer. Record each decision so the trade can be read from real turns.
+      // `gate` and `detail` name the step that decided and what it saw: eleven recorded decisions
+      // have never once applied, and all four taken under real pressure stopped at the same gate,
+      // which the reason string alone could not have told us.
       if (!lunaTurn) {
         appendDiagnosticRecord("checkpoint.jsonl", {
           traceId,
@@ -277,6 +280,8 @@ export function createChatGptWebAdapter(
           collapsing: historyCollapsing,
           applied: checkpointInput.applied,
           ...(checkpointInput.reason ? { reason: checkpointInput.reason } : {}),
+          ...(checkpointInput.gate ? { gate: checkpointInput.gate } : {}),
+          ...(checkpointInput.detail ? { detail: checkpointInput.detail } : {}),
         });
       }
     }

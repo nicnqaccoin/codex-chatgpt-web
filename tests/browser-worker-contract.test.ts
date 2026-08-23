@@ -1805,3 +1805,29 @@ test("checkpoint capture is not restricted by model in the browser worker", () =
   // The pairing guard must stay: capture and its callback arrive together or not at all.
   expect(runBrowserTurn).toContain("requires exactly one checkpoint callback");
 });
+
+/**
+ * Three real turns have died on the missing completed-turn action, and the message alone could not
+ * distinguish a detector that missed a finished answer from generation that genuinely hung. Losing
+ * a completed answer and reporting a fault are different outcomes, so the failure carries what the
+ * tracker observed.
+ */
+test("a missing completed-turn action reports the answer size and how long it stood still", () => {
+  const graceMs = 1_000;
+  const tracker = new ChatGptTurnDomHealthTracker(600_000, 600_000, graceMs);
+  const state = {
+    responsePresent: true,
+    running: false,
+    currentText: "x".repeat(4_096),
+    completionActionVisible: false,
+  };
+
+  expect(tracker.update(state, 0)).toBeUndefined();
+  expect(tracker.update(state, graceMs - 1)).toBeUndefined();
+
+  const failure = tracker.update(state, graceMs);
+  expect(failure).toContain("did not expose its completed-turn action");
+  expect(failure).toContain("answerChars=4096");
+  expect(failure).toContain("unchangedFor=1s");
+  expect(failure).toContain("grace=1s");
+});

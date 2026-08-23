@@ -261,3 +261,46 @@ test("Luna checkpoint preserves the server-resolved backend model when the raw b
   expect(applied.parsed.modelId).toBe("gpt-5.6-luna");
   expect(applied.parsed.options.reasoning).toBe("low");
 });
+
+/**
+ * Eleven recorded decisions have never once applied, and all four taken under real pressure stopped
+ * at the same gate. The reason string could not say whether the current turn was never located or
+ * whether the replayed prefix simply ends in output declaring no turn of its own, so a failure now
+ * names its gate and reports what that gate saw.
+ */
+test("a rejected checkpoint names the gate that decided and what it saw", () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-luna-gate-"));
+  roots.push(root);
+  const path = join(root, "checkpoints.json");
+
+  // No thread identity at all: the first gate.
+  const anonymous = parseRequest({
+    model: "gpt-5.6-luna",
+    input: [message("user", "Do the thing", "turn_one")],
+    stream: true,
+  });
+  const noIdentity = new ChatGptLunaCheckpointStore(path).apply(anonymous);
+  expect(noIdentity.applied).toBe(false);
+  expect(noIdentity.gate).toBe("identity");
+
+  // A current turn with nothing before it: the parent gate, and the detail has to distinguish this
+  // from a prefix whose assistant output carries no turn identity.
+  const firstTurn = request("thread_gate", "turn_first", [
+    message("user", "Do the thing", "turn_first"),
+  ]);
+  const noParent = new ChatGptLunaCheckpointStore(path).apply(firstTurn);
+  expect(noParent.applied).toBe(false);
+  expect(noParent.gate).toBe("parent");
+  expect(noParent.detail).toMatchObject({ boundary: 0, assistantsBeforeBoundary: 0 });
+
+  // A parent that is present and identified, but no checkpoint was ever captured for this thread.
+  const withParent = request("thread_gate", "turn_second", [
+    message("assistant", "The thing is done.", "turn_first"),
+    message("user", "Now the next thing", "turn_second"),
+  ]);
+  const noStored = new ChatGptLunaCheckpointStore(path).apply(withParent);
+  expect(noStored.applied).toBe(false);
+  expect(noStored.gate).toBe("store");
+  expect(noStored.detail).toMatchObject({ storedForThread: 0 });
+  expect((noStored.detail as { parentAnswerChars: number }).parentAnswerChars).toBeGreaterThan(0);
+});

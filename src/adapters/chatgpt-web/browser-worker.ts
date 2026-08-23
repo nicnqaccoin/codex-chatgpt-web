@@ -548,7 +548,16 @@ export class ChatGptTurnDomHealthTracker {
     } else if (this.missingCompletionAction?.text !== state.currentText) {
       this.missingCompletionAction = { text: state.currentText, since: now };
     } else if (now - this.missingCompletionAction.since >= this.missingCompletionActionMs) {
-      return "ChatGPT stopped generating but did not expose its completed-turn action; the ChatGPT DOM may have changed";
+      // Three real turns have died here, and the message alone could not say whether the detector
+      // missed a finished answer or ChatGPT genuinely stalled - the difference between losing work
+      // and reporting a fault. Carry what this tracker actually observed: an answer that stopped
+      // growing for the whole grace period looks finished, so a large stable count argues the
+      // marker moved rather than that generation hung.
+      const stableFor = Math.round((now - this.missingCompletionAction.since) / 1_000);
+      return "ChatGPT stopped generating but did not expose its completed-turn action;"
+        + " the ChatGPT DOM may have changed"
+        + ` (answerChars=${state.currentText.length}, unchangedFor=${stableFor}s,`
+        + ` grace=${Math.round(this.missingCompletionActionMs / 1_000)}s)`;
     }
     return undefined;
   }
