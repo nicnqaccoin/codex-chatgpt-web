@@ -2,6 +2,12 @@ import type { Locator, Page } from "playwright-core";
 import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
 
 export const CHATGPT_TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
+/**
+ * A normal chat, which unlike a Temporary Chat survives the turn. Only used when the transport
+ * has been asked to keep one conversation per session; it is where such a session starts before
+ * ChatGPT assigns the /c/<id> the following turns resume into.
+ */
+export const CHATGPT_NEW_CHAT_URL = "https://chatgpt.com/";
 export const CHATGPT_COMPOSER_SELECTOR = [
   '[data-testid="prompt-textarea"]',
   "#prompt-textarea",

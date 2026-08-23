@@ -258,6 +258,11 @@ export interface CodexProviderConfig {
     lunaCheckpointStatePath?: string;
     /** Optional explicit safety ceiling. Browser turns have no absolute deadline by default. */
     turnTimeoutMs?: number;
+    /**
+     * Continue one ChatGPT conversation per session and send only what changed, instead of
+     * replaying the whole prompt into a fresh Temporary Chat every turn.
+     */
+    persistentConversation?: boolean;
     /** Keep the single controlled browser visible. */
     headed?: boolean;
     /** Attach the turn-bound Codex MCP capability for every connector-capable Web model. */

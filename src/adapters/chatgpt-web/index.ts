@@ -5,7 +5,13 @@ import { namespacedToolName, type AdapterEvent, type CodexContentPart, type Code
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError } from "./adapter-error";
-import { ChatGptBrowserWorker } from "./browser-worker";
+import { ChatGptBrowserWorker, type BrowserTurn } from "./browser-worker";
+import { CHATGPT_NEW_CHAT_URL } from "../../chatgpt-session";
+import {
+  ChatGptConversationViews,
+  chatGptConversationDelta,
+  chatGptMessageSignatures,
+} from "./conversation-delta";
 import { appendDiagnosticRecord } from "./diagnostics-log";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity } from "./environment";
 import { repairMissingFinalArtifactReference } from "./final-artifacts";
@@ -220,6 +226,7 @@ export function createChatGptWebAdapter(
       ? resolve(expandUserPath(provider.chatgptWeb.lunaCheckpointStatePath))
       : undefined,
   );
+  const conversationViews = new ChatGptConversationViews();
   const currentUsageInput = (parsed: CodexParsedRequest): CodexParsedRequest => (
     parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID && !parsed._compactionRequest
       ? lunaCheckpointStore.apply(parsed).parsed
@@ -300,6 +307,45 @@ export function createChatGptWebAdapter(
       if (capturedCheckpoint) lunaCheckpointStore.commit(parsed, capturedCheckpoint, answer);
       return answer;
     });
+    // Every turn otherwise opens a fresh Temporary Chat, so the instruction contract - about a fifth
+    // of the composer budget, and identical between turns - is retyped each time. Keeping one
+    // conversation per session and sending only the tail removes that cost, but only while both
+    // sides still agree on what was already said; when they do not, this rotates to a new
+    // conversation and replays everything, which is exactly the behaviour without the flag.
+    const persistentConversation = provider.chatgptWeb?.persistentConversation === true
+      && !parsed._compactionRequest
+      && !lunaTurn
+      && Boolean(identity.threadId);
+    let promptInput = checkpointInput.parsed;
+    let conversation: BrowserTurn["conversation"];
+    if (persistentConversation) {
+      const sessionKey = `${executionNamespace}:${identity.threadId}`;
+      const messages = checkpointInput.parsed.context.messages;
+      const signatures = chatGptMessageSignatures(messages);
+      const view = conversationViews.get(sessionKey);
+      const delta = chatGptConversationDelta(view, messages);
+      const remember = (conversationUrl: string): void => {
+        conversationViews.remember(sessionKey, conversationUrl, signatures);
+      };
+      if (delta.kind === "append" && view) {
+        promptInput = {
+          ...checkpointInput.parsed,
+          context: { ...checkpointInput.parsed.context, messages: delta.messages },
+        };
+        conversation = { resumeUrl: view.conversationId, onEstablished: remember };
+      } else {
+        // Rotation is the safety valve, not a failure: the worst case is one full replay, which is
+        // what every turn costs today.
+        conversationViews.forget(sessionKey);
+        conversation = { resumeUrl: CHATGPT_NEW_CHAT_URL, onEstablished: remember };
+        if (delta.kind === "rotate") {
+          console.info(
+            `[chatgpt-web] conversation rotated (${delta.reason}`
+            + `${delta.divergedAt === undefined ? "" : `, divergedAt=${delta.divergedAt}`})`,
+          );
+        }
+      }
+    }
     const browserAbort = new AbortController();
     const trace = new ChatGptTraceFeed();
     const text = new ChatGptTextFeed();
@@ -311,7 +357,7 @@ export function createChatGptWebAdapter(
         capabilities: turnCapabilities,
         prepare: async () => ({
           ...compileChatGptWebPrompt(
-            checkpointInput.parsed,
+            promptInput,
             turnCapabilities,
             undefined,
             { captureLunaCheckpoint },
@@ -323,6 +369,7 @@ export function createChatGptWebAdapter(
         onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
         onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
         onTextDelta: delta => text.push(delta),
+        ...(conversation ? { conversation } : {}),
         ...(captureLunaCheckpoint ? {
           captureLunaCheckpoint: true,
           onLunaCheckpoint: captureCheckpoint,
@@ -356,7 +403,7 @@ export function createChatGptWebAdapter(
         token.resolve(turnToken);
         try {
           const compiled = compileChatGptWebPrompt(
-            checkpointInput.parsed,
+            promptInput,
             turnCapabilities,
             turnToken,
             { captureLunaCheckpoint },
@@ -372,6 +419,7 @@ export function createChatGptWebAdapter(
       onReasoningSummary: (text, continuation) => trace.push({ kind: "reasoning", text, ...(continuation ? { continuation: true } : {}) }),
       onCommentary: (text, continuation) => trace.push({ kind: "commentary", text, ...(continuation ? { continuation: true } : {}) }),
       onTextDelta: delta => text.push(delta),
+      ...(conversation ? { conversation } : {}),
       ...(captureLunaCheckpoint ? {
         captureLunaCheckpoint: true,
         onLunaCheckpoint: captureCheckpoint,
