@@ -1597,8 +1597,12 @@ export class ChatGptBrowserWorker {
           );
         if (knownIdentityMismatch) {
           if (inheritable) {
+            // The mention loop typed "@c" to open the menu and nothing consumed it here, so it would ride
+            // into the prompt and break the byte-exact attachment postcondition.
+            const inherited = await this.activeComposer(page);
+            await inherited.fill("");
             await captureDiagnostic?.("connector-inherited");
-            return await this.activeComposer(page);
+            return inherited;
           }
           await captureDiagnostic?.("connector-menu-missing");
           throw new Error(await this.connectorMentionFailure(menuRows, triggerAttempts));
@@ -1614,8 +1618,12 @@ export class ChatGptBrowserWorker {
             }
           }
           if (inheritable) {
+            // The mention loop typed "@c" to open the menu and nothing consumed it here, so it would ride
+            // into the prompt and break the byte-exact attachment postcondition.
+            const inherited = await this.activeComposer(page);
+            await inherited.fill("");
             await captureDiagnostic?.("connector-inherited");
-            return await this.activeComposer(page);
+            return inherited;
           }
           await captureDiagnostic?.("connector-menu-missing");
           throw new Error(await this.connectorMentionFailure(menuRows, triggerAttempts));

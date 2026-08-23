@@ -980,11 +980,12 @@ test("a resumed conversation inherits its connector instead of failing on the ab
   timeout.name = "TimeoutError";
   const realDateNow = Date.now;
   const checkpoints: string[] = [];
+  let actions: string[] = [];
   const inheritedComposer = {
     inherited: true,
-    fill: async () => {},
+    fill: async (value: string) => { actions.push(`fill:${value}`); },
     focus: async () => {},
-    pressSequentially: async () => {},
+    pressSequentially: async (value: string) => { actions.push(`type:${value}`); },
   };
 
   const run = async (url: string, userTurns: number) => {
@@ -1019,8 +1020,14 @@ test("a resumed conversation inherits its connector instead of failing on the ab
     }
   };
 
+  actions = [];
   expect(await run("https://chatgpt.com/c/6a8ac7b4-4000", 1)).toBe(inheritedComposer);
   expect(checkpoints).toContain("connector-inherited");
+  // The mention loop typed "@c" and no menu selection consumed it here. Leaving it behind prefixes
+  // the prompt with three characters and fails the byte-exact attachment postcondition every turn,
+  // so the clear has to come after the last thing typed rather than merely somewhere before it.
+  expect(actions.at(-1)).toBe("fill:");
+  expect(actions).toContain("type:@c");
 
   // Inheriting must not depend on the conversation having rendered its turns yet: that count races
   // with hydration, and reading zero sent the turn down the stale-catalog detour instead.
