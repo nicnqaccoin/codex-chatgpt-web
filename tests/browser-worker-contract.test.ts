@@ -1022,8 +1022,10 @@ test("a resumed conversation inherits its connector instead of failing on the ab
   expect(await run("https://chatgpt.com/c/6a8ac7b4-4000", 1)).toBe(inheritedComposer);
   expect(checkpoints).toContain("connector-inherited");
 
-  // No turns yet means nothing can have bound the connector, so there is nothing to inherit.
-  await expect(run("https://chatgpt.com/c/6a8ac7b4-4000", 0)).rejects.toThrow("menu absent");
+  // Inheriting must not depend on the conversation having rendered its turns yet: that count races
+  // with hydration, and reading zero sent the turn down the stale-catalog detour instead.
+  expect(await run("https://chatgpt.com/c/6a8ac7b4-4000", 0)).toBe(inheritedComposer);
+
   await expect(run("https://chatgpt.com/", 1)).rejects.toThrow("menu absent");
 });
 

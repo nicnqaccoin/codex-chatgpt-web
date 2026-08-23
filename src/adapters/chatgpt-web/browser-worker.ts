@@ -910,12 +910,15 @@ export function chatGptPromptFilePayloads(
 /**
  * ChatGPT binds a connector to the conversation rather than to each message: once a conversation has
  * run through one, the mention menu stops offering it and later messages keep using it anyway. Only a
- * conversation that already holds turns can have that binding, so this is evidence rather than an
- * assumption - a fresh chat can never take this path.
+ *
+ * Being on a conversation url is the whole test. The bridge only ever navigates to a conversation it
+ * established itself from a turn that selected the connector, and a new chat is opened at the root or
+ * the temporary chat url, so a fresh chat cannot reach this branch. Counting rendered turns was tried
+ * as extra evidence and lost a race with hydration: the count read zero, the turn took the stale
+ * catalog detour, and only inherited on the retry.
  */
-export async function chatGptConversationOwnsConnector(page: Page): Promise<boolean> {
-  if (!page.url().includes("chatgpt.com/c/")) return false;
-  return await page.locator(CHATGPT_USER_TURN_SELECTOR).count() > 0;
+export function chatGptConversationOwnsConnector(page: Page): boolean {
+  return page.url().includes("chatgpt.com/c/");
 }
 
 export class ChatGptBrowserWorker {
@@ -1562,7 +1565,7 @@ export class ChatGptBrowserWorker {
     });
     // A conversation that already owns the connector will never offer it again, so waiting the full
     // budget on every resumed turn would only add twenty seconds to each one.
-    const inheritable = await chatGptConversationOwnsConnector(page);
+    const inheritable = chatGptConversationOwnsConnector(page);
     const menuDeadline = Date.now() + (inheritable ? 4_000 : 20_000);
     let triggerAttempts = 0;
     let firstMenuCaptured = false;
