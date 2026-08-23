@@ -427,6 +427,20 @@ export interface BrowserTurn {
   /** Require and remove the private Luna checkpoint tail from the visible Markdown stream. */
   captureLunaCheckpoint?: boolean;
   onLunaCheckpoint?: (captured: CapturedChatGptLunaCheckpoint) => void;
+  /**
+   * Continue an existing ChatGPT conversation instead of opening a fresh Temporary Chat, so the
+   * instruction contract this turn would otherwise retype - about a fifth of the composer budget,
+   * and identical every turn - is already above the composer.
+   *
+   * Absent means today's behaviour. `resumeUrl` is only honoured when the caller has established
+   * that the conversation exists and that what it holds is a prefix of the history being sent;
+   * `onEstablished` reports back the conversation the turn actually landed in, which is how the
+   * first turn's conversation becomes the next turn's `resumeUrl`.
+   */
+  conversation?: {
+    resumeUrl?: string;
+    onEstablished?: (conversationUrl: string) => void;
+  };
 }
 
 interface ChatGptSubmissionBaseline {
@@ -1322,23 +1336,34 @@ export class ChatGptBrowserWorker {
     throw new Error(`ChatGPT did not expose exactly one visible composer (visibleComposers=${count})`);
   }
 
-  /** Put every browser operation on one fully hydrated Temporary Chat document. */
+  /**
+   * Put every browser operation on one fully hydrated chat document.
+   *
+   * That is a fresh Temporary Chat unless the caller is continuing a conversation it has already
+   * established. The isolation this normally enforces is about the *page*, not the conversation:
+   * the recorded reason is that reusing a live SPA document keeps the previous transcript and
+   * autocomplete DOM, so an @app lookup can select stale UI. Every turn still opens its own page
+   * and navigates once, so a resumed conversation gets the same clean document - verified by hand
+   * against a real conversation, where the mention menu resolved the connector correctly.
+   */
   private async prepareTemporaryChatSurface(
     page: Page,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
+    resumeUrl?: string,
   ): Promise<Locator> {
     // Launcher verification refreshes its owned page before attaching Playwright so a newly added
     // connector is present in the catalog. Navigating again here destroys that freshly hydrated
     // document and made the first verification race a second SPA bootstrap. A leased turn starts on
     // about:blank and therefore still performs exactly one navigation through this same method.
-    if (page.url() !== CHATGPT_TEMPORARY_CHAT_URL) {
+    const target = resumeUrl ?? CHATGPT_TEMPORARY_CHAT_URL;
+    if (page.url() !== target) {
       // A leased tab is handed over while the launcher's own about:blank navigation may still be
       // committing, and Chromium answers the overlapping request by aborting this one before it
       // reaches the network. The navigation never started, so retrying is safe, and it is the
       // difference between a retried turn and a turn the user watches fail.
       for (let attempt = 0; ; attempt += 1) {
         try {
-          await page.goto(CHATGPT_TEMPORARY_CHAT_URL, {
+          await page.goto(target, {
             waitUntil: "domcontentloaded",
             timeout: 60_000,
           });
@@ -1361,8 +1386,10 @@ export class ChatGptBrowserWorker {
     await captureDiagnostic?.("composer-ready");
     await throwIfChatGptSessionFailureAlert(page);
     await assertAuthenticatedChatGptPage(page);
-    await assertTemporaryChatPage(page);
-    await captureDiagnostic?.("session-verified");
+    // A resumed conversation is deliberately not a Temporary Chat, so asserting one here would
+    // reject the surface the caller asked for. Authentication is still required either way.
+    if (!resumeUrl) await assertTemporaryChatPage(page);
+    await captureDiagnostic?.(resumeUrl ? "conversation-resumed" : "session-verified");
     return composer;
   }
 
@@ -2298,6 +2325,7 @@ export class ChatGptBrowserWorker {
         () => this.prepareTemporaryChatSurface(
           page,
           checkpoint => diagnostics.capture(page, checkpoint),
+          turn.conversation?.resumeUrl,
         ),
       );
       const responseTurns = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR);
@@ -2354,6 +2382,7 @@ export class ChatGptBrowserWorker {
               await this.prepareTemporaryChatSurface(
                 page,
                 checkpoint => diagnostics.capture(page, checkpoint),
+                turn.conversation?.resumeUrl,
               );
             },
           );
@@ -2553,6 +2582,14 @@ export class ChatGptBrowserWorker {
         atomicWriteFile(this.config.storageStatePath, `${JSON.stringify(state)}\n`);
       }
       await diagnostics.capture(page, "turn-completed");
+      // Report the conversation only after the answer is complete. A Temporary Chat never leaves
+      // its own URL, so this reports nothing there; a persistent one has moved to /c/<id> by now,
+      // and that is what the next turn resumes into. Reporting earlier would risk recording the
+      // pre-navigation URL and sending the following turn to a conversation that holds nothing.
+      if (turn.conversation?.onEstablished) {
+        const settled = page.url();
+        if (settled && settled !== CHATGPT_TEMPORARY_CHAT_URL) turn.conversation.onEstablished(settled);
+      }
       console.info(`[chatgpt-web] browser turn ${turn.traceId} completed (markdownChars=${finalText.length})`);
       return finalText;
     } catch (error) {
