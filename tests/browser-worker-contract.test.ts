@@ -1916,3 +1916,45 @@ test("a missing completed-turn action reports the answer size and how long it st
   expect(failure).toContain("unchangedFor=1s");
   expect(failure).toContain("grace=1s");
 });
+
+/**
+ * A conversation url serves the SPA shell first and fetches the transcript after. Reading the turn
+ * baseline against that empty document counted zero assistant turns, so the turn watched the answer
+ * already on screen and returned it as its own - a wrong answer shaped exactly like a right one.
+ */
+test("a resumed conversation waits for its transcript before the baseline is read", async () => {
+  const waitForResumedTranscript = (ChatGptBrowserWorker.prototype as unknown as {
+    waitForResumedTranscript(page: unknown, capture?: unknown): Promise<void>;
+  }).waitForResumedTranscript;
+  const realDateNow = Date.now;
+
+  const run = async (counts: number[], stepMs = 800) => {
+    let now = realDateNow();
+    let index = 0;
+    const checkpoints: string[] = [];
+    const page = {
+      locator: () => ({
+        count: async () => {
+          now += stepMs;
+          return counts[Math.min(index++, counts.length - 1)];
+        },
+      }),
+    };
+    Date.now = () => now;
+    try {
+      await waitForResumedTranscript.call({}, page, async (checkpoint: string) => {
+        checkpoints.push(checkpoint);
+      });
+      return checkpoints;
+    } finally {
+      Date.now = realDateNow;
+    }
+  };
+
+  // The shell renders first: the count has to settle on a non-zero transcript, not on the first read.
+  expect(await run([0, 0, 1, 1, 1])).toEqual(["resumed-transcript-ready"]);
+
+  // A conversation is only resumed after a turn completed inside it, so an empty transcript means the
+  // page never loaded what this turn is about to append to. Failing beats appending onto nothing.
+  await expect(run([0], 30_000)).rejects.toThrow("did not render the resumed conversation transcript");
+});

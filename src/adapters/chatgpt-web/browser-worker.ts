@@ -115,7 +115,11 @@ const settleChatGptUi = (): Promise<void> => (
 export const CHATGPT_MENU_ANIMATION_SETTLE_MS = 500;
 
 /** Overlapping navigations abort each other; the target never changes, so a bounded retry is safe. */
-export const CHATGPT_NAVIGATION_ABORT_RETRIES = 2;
+export /** A resumed transcript arrives by fetch after the shell; these bound the wait for it. */
+const CHATGPT_RESUMED_TRANSCRIPT_STABLE_MS = 750;
+const CHATGPT_RESUMED_TRANSCRIPT_TIMEOUT_MS = 20_000;
+
+const CHATGPT_NAVIGATION_ABORT_RETRIES = 2;
 
 const settleChatGptMenuAnimation = (): Promise<void> => (
   new Promise(resolveSettle => setTimeout(resolveSettle, CHATGPT_MENU_ANIMATION_SETTLE_MS))
@@ -1403,8 +1407,44 @@ export class ChatGptBrowserWorker {
     // A resumed conversation is deliberately not a Temporary Chat, so asserting one here would
     // reject the surface the caller asked for. Authentication is still required either way.
     if (!resumeUrl) await assertTemporaryChatPage(page);
+    // A conversation url serves the SPA shell first and fetches the transcript afterwards, so the
+    // caller was reading its turn baseline against an empty document: zero assistant turns counted,
+    // the turn aimed at the answer already on screen, and returned the previous answer as its own -
+    // silently, and indistinguishable from success. Require the transcript before handing the page
+    // back: a conversation is only ever resumed after a turn completed inside it, so an empty one
+    // means the page never loaded what this turn is about to append to.
+    if (resumeUrl && chatGptConversationOwnsConnector(page)) {
+      await this.waitForResumedTranscript(page, captureDiagnostic);
+    }
     await captureDiagnostic?.(resumeUrl ? "conversation-resumed" : "session-verified");
     return composer;
+  }
+
+  private async waitForResumedTranscript(
+    page: Page,
+    captureDiagnostic?: (checkpoint: string) => Promise<void>,
+  ): Promise<void> {
+    const responseTurns = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR);
+    const deadline = Date.now() + CHATGPT_RESUMED_TRANSCRIPT_TIMEOUT_MS;
+    let observed = -1;
+    let stableSince = Date.now();
+    for (;;) {
+      const turns = await responseTurns.count();
+      if (turns !== observed) {
+        observed = turns;
+        stableSince = Date.now();
+      }
+      if (turns > 0 && Date.now() - stableSince >= CHATGPT_RESUMED_TRANSCRIPT_STABLE_MS) {
+        await captureDiagnostic?.("resumed-transcript-ready");
+        return;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `ChatGPT did not render the resumed conversation transcript (assistantTurns=${turns})`,
+        );
+      }
+      await settleChatGptUi();
+    }
   }
 
   private async waitForSubmissionAccepted(
@@ -2364,6 +2404,16 @@ export class ChatGptBrowserWorker {
       const responseTurns = page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR);
       const initialResponseTurnCount = await responseTurns.count();
       const responseTurn = responseTurns.nth(initialResponseTurnCount);
+      // The baseline is the only thing telling this turn which answer is its own. If the element it
+      // is about to watch already exists, the count was read against a document that had not finished
+      // rendering, and the turn would hand back the previous answer as this one - a wrong result that
+      // looks exactly like a right one. Refuse instead.
+      if (await responseTurn.count() !== 0) {
+        throw new Error(
+          `ChatGPT response baseline is stale (initialResponseTurnCount=${initialResponseTurnCount},`
+          + ` responseTurns=${await responseTurns.count()})`,
+        );
+      }
       const userTurns = page.locator(CHATGPT_USER_TURN_SELECTOR);
       const initialUserTurnCount = await userTurns.count();
       const submissionBaseline: ChatGptSubmissionBaseline = {
