@@ -762,6 +762,52 @@ export function pruneSemanticToolResults(
  * Progressive deep tool result compaction: for non-recent tool results outside the active turn
  * and verbatim tail, reduces any remaining bulky outputs to compact 1-line semantic receipts.
  */
+/**
+ * A replayed tool call is a record of what was already done, not an instruction to do it again, so
+ * outside the verbatim window its payload carries no more weight than the output it produced - and
+ * that output is already a receipt. Keeping the arguments whole while compacting the results was an
+ * asymmetry with a measurable price: in a 193 message session the calls were 39.1% of the compiled
+ * prompt while their results were 20.7%.
+ *
+ * Argument keys survive, so the call still says which file or command it touched; only long string
+ * values are replaced. A short call is left exactly as it is.
+ */
+export const CHATGPT_MAX_REPLAYED_TOOL_CALL_ARGUMENT_CHARS = 200;
+
+function elideToolCallArguments(args: Record<string, unknown>): Record<string, unknown> | undefined {
+  let changed = false;
+  const elided: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(args)) {
+    if (typeof value === "string" && value.length > CHATGPT_MAX_REPLAYED_TOOL_CALL_ARGUMENT_CHARS) {
+      elided[key] = `[${value.length.toLocaleString("en-US")} chars elided from this older tool call]`;
+      changed = true;
+      continue;
+    }
+    elided[key] = value;
+  }
+  return changed ? elided : undefined;
+}
+
+export function compactToolCallArgumentsToReceipts(
+  messages: readonly CodexMessage[],
+  verbatimTail = CHATGPT_DEFAULT_VERBATIM_TOOL_RESULT_MESSAGES,
+): CodexMessage[] {
+  const verbatimThreshold = messages.length - verbatimTail;
+  return messages.map((message, index) => {
+    if (message.role !== "assistant" || index >= verbatimThreshold) return message;
+    if (!Array.isArray(message.content)) return message;
+    let changed = false;
+    const content = message.content.map(part => {
+      if (part.type !== "toolCall") return part;
+      const elided = elideToolCallArguments(part.arguments);
+      if (!elided) return part;
+      changed = true;
+      return { ...part, arguments: elided };
+    });
+    return changed ? { ...message, content } : message;
+  });
+}
+
 export function compactToolResultsToReceipts(
   messages: readonly CodexMessage[],
   verbatimTail = CHATGPT_DEFAULT_VERBATIM_TOOL_RESULT_MESSAGES,

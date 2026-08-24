@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   CHATGPT_MAX_SINGLE_TOOL_RESULT_CHARS,
   pruneSemanticToolResults,
+  compactToolCallArgumentsToReceipts,
   compactToolResultsToReceipts,
   getLatestUserIndex,
   isInstructionMessage,
@@ -509,4 +510,74 @@ test("the checkpoint replaces history only when the loss is structural", () => {
   // A short conversation has no quarter to lose, so the floor decides instead of the fraction.
   expect(chatGptWebHistoryIsCollapsing(2, 12)).toBe(false);
   expect(chatGptWebHistoryIsCollapsing(8, 12)).toBe(true);
+});
+
+/**
+ * A replayed tool call records what was already done; it is not an instruction to do it again. Its
+ * result is already a receipt outside the verbatim window, so keeping the call's payload whole was
+ * an asymmetry with a price: in a 193 message session the calls were 39.1% of the compiled prompt
+ * while their results were 20.7%, and the prompt sat at 109,907 of 110,000 chars.
+ */
+test("an older tool call keeps its keys but loses its payload", () => {
+  const patch = "x".repeat(5_000);
+  const messages: CodexMessage[] = [];
+  for (let turn = 0; turn < 10; turn += 1) {
+    messages.push(userMessage(`Task ${turn}`, turn * 3));
+    messages.push(assistantToolCallMessage(
+      [{ id: `c${turn}`, name: "apply_patch", args: { path: `src/file${turn}.ts`, patch, retries: 2 } }],
+      turn * 3 + 1,
+    ));
+    messages.push(toolResultMessage(`c${turn}`, "apply_patch", "ok", turn * 3 + 2));
+  }
+
+  const compacted = compactToolCallArgumentsToReceipts(messages);
+  const argsAt = (index: number) => (compacted[index] as { content: { arguments: Record<string, unknown> }[] })
+    .content[0].arguments;
+
+  const older = argsAt(1);
+  // The call still says which file it touched, and what it did - only the payload is gone.
+  expect(older.path).toBe("src/file0.ts");
+  expect(older.retries).toBe(2);
+  expect(older.patch).toBe("[5,000 chars elided from this older tool call]");
+
+  // The verbatim window is the same one the results use, so the recent call is untouched.
+  const recent = argsAt(messages.length - 2);
+  expect(recent.patch).toBe(patch);
+  expect(compacted[messages.length - 2]).toBe(messages[messages.length - 2]);
+});
+
+test("a tool call with nothing large to lose is returned untouched", () => {
+  const messages: CodexMessage[] = [];
+  for (let turn = 0; turn < 10; turn += 1) {
+    messages.push(userMessage(`Task ${turn}`, turn * 2));
+    messages.push(assistantToolCallMessage(
+      [{ id: `c${turn}`, name: "exec_command", args: { command: "bun test", timeoutMs: 60_000 } }],
+      turn * 2 + 1,
+    ));
+  }
+  const compacted = compactToolCallArgumentsToReceipts(messages);
+  expect(compacted.every((message, index) => message === messages[index])).toBeTrue();
+});
+
+/**
+ * Testing the function alone would pass whether or not the compiler calls it - the mistake that
+ * shipped a green test for an unwired fix earlier. This drives the compiler.
+ */
+test("the compiler compacts older calls once the prompt is over budget", () => {
+  const patch = "y".repeat(20_000);
+  const messages: CodexMessage[] = [];
+  for (let turn = 0; turn < 12; turn += 1) {
+    messages.push(userMessage(`Task ${turn}`, turn * 3));
+    messages.push(assistantToolCallMessage(
+      [{ id: `c${turn}`, name: "apply_patch", args: { path: `src/file${turn}.ts`, patch } }],
+      turn * 3 + 1,
+    ));
+    messages.push(toolResultMessage(`c${turn}`, "apply_patch", "z".repeat(20_000), turn * 3 + 2));
+  }
+
+  const compiled = compileChatGptWebPrompt(request(messages), plusCapabilities, "turn-token-456");
+  expect(compiled.text.length).toBeLessThanOrEqual(110_000);
+  expect(compiled.text).toContain("chars elided from this older tool call");
+  // The newest call is inside the verbatim window and must survive intact.
+  expect(compiled.text).toContain("src/file11.ts");
 });

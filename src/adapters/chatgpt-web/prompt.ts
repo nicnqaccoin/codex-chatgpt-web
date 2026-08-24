@@ -10,6 +10,7 @@ import {
 } from "./rolling-checkpoint";
 import {
   CHATGPT_DEFAULT_VERBATIM_TOOL_RESULT_MESSAGES,
+  compactToolCallArgumentsToReceipts,
   compactToolResultsToReceipts,
   elideToolResultText,
   isInstructionMessage,
@@ -545,7 +546,9 @@ export function compileChatGptWebPrompt(
   // If initial semantic pruning still exceeds the budget, apply deep tool receipt compaction
   // before discarding whole conversation turns.
   if (exceedsBudget()) {
-    const deeplyCompacted = compactToolResultsToReceipts(sourceMessages);
+    // Compact the calls with their results: same window, same pressure gate, so a replayed turn does
+    // not keep its payload while the output it produced is reduced to a receipt.
+    const deeplyCompacted = compactToolCallArgumentsToReceipts(compactToolResultsToReceipts(sourceMessages));
     if (deeplyCompacted.some((msg, idx) => msg !== sourceMessages[idx])) {
       sourceMessages = deeplyCompacted;
       compiled = build(sourceMessages);

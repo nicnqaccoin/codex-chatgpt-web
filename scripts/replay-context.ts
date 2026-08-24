@@ -344,4 +344,61 @@ for (const file of files) {
 
   console.log(`  fit recovery    kept ${kept}/${slice.length}, dropped ${slice.length - kept}`);
   console.log(`  compiled prompt ${compiled.text.length.toLocaleString("en-US")} chars`);
+
+  // What actually occupies the compiled prompt, read from the envelope the model receives rather
+  // than from the raw slice. Measuring the pre-pruning messages here reported tool results at 2142%
+  // of the prompt and a negative envelope - the wrong stage, which is the easiest mistake to make
+  // in this file and the hardest to notice.
+  {
+    const open = compiled.text.indexOf("<codex_context_json>");
+    const close = compiled.text.indexOf("</codex_context_json>");
+    const body = open >= 0 && close > open
+      ? compiled.text.slice(open + "<codex_context_json>".length, close).trim()
+      : undefined;
+    const parsed = body ? JSON.parse(body) as { messages?: { role?: string }[] } : undefined;
+    if (parsed?.messages) {
+      const byRole = new Map<string, { count: number; chars: number }>();
+      for (const message of parsed.messages) {
+        const role = String(message.role ?? "?");
+        const entry = byRole.get(role) ?? { count: 0, chars: 0 };
+        entry.count += 1;
+        entry.chars += JSON.stringify(message).length;
+        byRole.set(role, entry);
+      }
+      const conversation = [...byRole.values()].reduce((total, e) => total + e.chars, 0);
+      const overhead = compiled.text.length - conversation;
+      const pct = (v: number): string => `${((v / compiled.text.length) * 100).toFixed(1)}%`;
+      console.log(`  breakdown       instructions+envelope ${overhead.toLocaleString("en-US")} (${pct(overhead)})`);
+      for (const [role, e] of [...byRole].sort((x, y) => y[1].chars - x[1].chars)) {
+        console.log(
+          `                  ${role.padEnd(12)} ${String(e.count).padStart(4)} msg  ` +
+          `${e.chars.toLocaleString("en-US").padStart(9)} chars (${pct(e.chars)})  ` +
+          `~${Math.round(e.chars / Math.max(1, e.count)).toLocaleString("en-US")}/msg`,
+        );
+      }
+
+      // Assistant turns dominate once the tool results are down to receipts, but they are three
+      // different things wearing one role: the answer, the tool calls that produced it, and the
+      // model's own reasoning summary. Only the split says whether there is anything safe to cut.
+      const byPart = new Map<string, { count: number; chars: number }>();
+      for (const message of parsed.messages) {
+        if (message.role !== "assistant") continue;
+        const parts = (message as { content?: { type?: string }[] }).content;
+        if (!Array.isArray(parts)) continue;
+        for (const part of parts) {
+          const type = String(part.type ?? "?");
+          const entry = byPart.get(type) ?? { count: 0, chars: 0 };
+          entry.count += 1;
+          entry.chars += JSON.stringify(part).length;
+          byPart.set(type, entry);
+        }
+      }
+      for (const [type, e] of [...byPart].sort((x, y) => y[1].chars - x[1].chars)) {
+        console.log(
+          `                    assistant/${type.padEnd(16)} ${String(e.count).padStart(4)} part  ` +
+          `${e.chars.toLocaleString("en-US").padStart(9)} chars (${pct(e.chars)})`,
+        );
+      }
+    }
+  }
 }
