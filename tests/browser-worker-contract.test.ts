@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
 import { CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
-import { chatGptNavigationAbortedRetryable } from "../src/adapters/chatgpt-web/browser-worker";
+import { chatGptNavigationAbortedRetryable, chatGptStageFailure } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
@@ -1997,4 +1997,63 @@ test("an aborted navigation is retryable once its in-place attempts are spent", 
   expect(classified).toBeInstanceOf(ChatGptWebAdapterError);
   expect(classified.retryable).toBeTrue();
   expect(classified.code).toBe("navigation_aborted");
+});
+
+/**
+ * Thirty of thirty-four recorded incidents were unclassified, so none of them was ever retried and
+ * every one was a dead turn. Everything before submission fails with nothing delivered to ChatGPT,
+ * which is the whole test for whether replaying is safe - so that is the default, and anything
+ * genuinely fatal has to say so itself.
+ */
+test("a pre-submission stage failure is retryable unless it declares otherwise", () => {
+  const raw = chatGptStageFailure("effort_selection", new Error("ChatGPT effort item index 2 lost its checked state"));
+  expect(raw).toBeInstanceOf(ChatGptWebAdapterError);
+  expect((raw as ChatGptWebAdapterError).retryable).toBeTrue();
+  expect((raw as ChatGptWebAdapterError).code).toBe("browser_stage_failed");
+  expect((raw as Error).message).toContain("lost its checked state");
+
+  // A stage timeout arrives as a plain Error too, and is just as safe to replay before submission.
+  const timedOut = chatGptStageFailure("prompt_attachment", new Error("ChatGPT browser stage timed out: prompt_attachment"));
+  expect((timedOut as ChatGptWebAdapterError).retryable).toBeTrue();
+
+  // Once the message is sent, replaying costs a generation and discards the answer that exists.
+  const afterSend = new Error("ChatGPT stopped generating but did not expose its completed-turn action");
+  expect(chatGptStageFailure("send", afterSend)).toBe(afterSend);
+
+  // An interruption is not a failure and must never be turned into a retry.
+  const interrupted = new DOMException("ChatGPT web turn aborted", "AbortError");
+  expect(chatGptStageFailure("prompt_attachment", interrupted)).toBe(interrupted);
+
+  // Retrying cannot conjure a login, so a classified fatal error keeps its own verdict.
+  const fatal = new ChatGptWebAdapterError("ChatGPT web login state is missing: C:/state.json", {
+    status: 500,
+    errorType: "invalid_request_error",
+    code: "chatgpt_setup_invalid",
+    retryable: false,
+  });
+  expect(chatGptStageFailure("browser_page", fatal)).toBe(fatal);
+});
+
+/**
+ * Testing the classifier alone passes whether or not it is wired in - removing the call in runStage
+ * left the previous test green. This one drives the stage runner, which is what the turn actually
+ * goes through.
+ */
+test("the stage runner applies that verdict to what escapes it", async () => {
+  const runStage = (ChatGptBrowserWorker.prototype as unknown as {
+    runStage(traceId: string, stage: string, timeoutMs: number, action: (signal: AbortSignal) => Promise<unknown>): Promise<unknown>;
+  }).runStage;
+
+  const escaped = await runStage.call(
+    {}, "trace", "prompt_attachment", 5_000,
+    async () => { throw new Error("ChatGPT composer could not re-anchor the prompt caret"); },
+  ).then(() => undefined, (error: unknown) => error);
+  expect(escaped).toBeInstanceOf(ChatGptWebAdapterError);
+  expect((escaped as ChatGptWebAdapterError).retryable).toBeTrue();
+
+  const afterSend = await runStage.call(
+    {}, "trace", "send", 5_000,
+    async () => { throw new Error("ChatGPT send button is disabled"); },
+  ).then(() => undefined, (error: unknown) => error);
+  expect(afterSend).not.toBeInstanceOf(ChatGptWebAdapterError);
 });

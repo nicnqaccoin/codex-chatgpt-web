@@ -955,6 +955,50 @@ export function chatGptConversationOwnsConnector(page: Page): boolean {
   return page.url().includes("chatgpt.com/c/");
 }
 
+/**
+ * Every stage up to submission fails with nothing delivered to ChatGPT, so replaying the turn is
+ * safe by construction - the same test that made the prompt attachment and the aborted navigation
+ * retryable, applied to the whole class instead of the two cases that happened to be recorded.
+ *
+ * Submission itself is excluded: once the message is sent, a replay costs a second generation and
+ * discards the answer that already exists.
+ */
+const CHATGPT_PRE_SUBMISSION_STAGES = new Set([
+  "browser_page",
+  "temporary_chat_preparation",
+  "effort_selection",
+  "prompt_attachment",
+  "file_attachment",
+]);
+
+/**
+ * Thirty of the thirty-four recorded incidents were unclassified, which means they were never
+ * retried and every one was a dead turn. The default is inverted here: a pre-submission failure is
+ * retryable unless it says otherwise, so anything genuinely fatal - a missing login, a missing
+ * browser - has to classify itself. An interruption keeps its own identity and is never retried.
+ */
+export function chatGptStageFailure(stage: string, error: unknown): unknown {
+  if (!CHATGPT_PRE_SUBMISSION_STAGES.has(stage)) return error;
+  if (error instanceof ChatGptWebAdapterError) return error;
+  if (!(error instanceof Error) || error.name === "AbortError") return error;
+  return new ChatGptWebAdapterError(error.message, {
+    status: 502,
+    errorType: "server_error",
+    code: "browser_stage_failed",
+    retryable: true,
+  });
+}
+
+/** Retrying cannot conjure a login or a browser, so these stay fatal despite the stage default. */
+function chatGptFatalSetupError(message: string): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(message, {
+    status: 500,
+    errorType: "invalid_request_error",
+    code: "chatgpt_setup_invalid",
+    retryable: false,
+  });
+}
+
 export class ChatGptBrowserWorker {
   static forProvider(provider: CodexProviderConfig): ChatGptBrowserWorker {
     const config = resolveBrowserConfig(provider);
@@ -1120,7 +1164,7 @@ export class ChatGptBrowserWorker {
       return value;
     } catch (error) {
       console.error(`[chatgpt-web] browser turn ${traceId} stage=${stage} failed durationMs=${Math.round(performance.now() - startedAt)}: ${error instanceof Error ? error.message : String(error)}`);
-      throw error;
+      throw chatGptStageFailure(stage, error);
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -1136,10 +1180,10 @@ export class ChatGptBrowserWorker {
       return this.page;
     }
     if (!existsSync(this.config.storageStatePath) || !existsSync(loginVerificationMarkerPath(this.config.storageStatePath))) {
-      throw new Error(`ChatGPT web login state is missing: ${this.config.storageStatePath}`);
+      throw chatGptFatalSetupError(`ChatGPT web login state is missing: ${this.config.storageStatePath}`);
     }
     if (!existsSync(this.config.chromeExecutablePath)) {
-      throw new Error(`Configured Chrome executable does not exist: ${this.config.chromeExecutablePath}`);
+      throw chatGptFatalSetupError(`Configured Chrome executable does not exist: ${this.config.chromeExecutablePath}`);
     }
     this.browser = await chromium.launch({
       executablePath: this.config.chromeExecutablePath,
@@ -1154,10 +1198,10 @@ export class ChatGptBrowserWorker {
     if (this.managedBrowserReady) return this.managedBrowserReady;
     const opening = (async () => {
       if (!existsSync(this.config.storageStatePath) || !existsSync(loginVerificationMarkerPath(this.config.storageStatePath))) {
-        throw new Error(`ChatGPT web login state is missing: ${this.config.storageStatePath}`);
+        throw chatGptFatalSetupError(`ChatGPT web login state is missing: ${this.config.storageStatePath}`);
       }
       if (!existsSync(this.config.chromeExecutablePath)) {
-        throw new Error(`Configured Chrome executable does not exist: ${this.config.chromeExecutablePath}`);
+        throw chatGptFatalSetupError(`Configured Chrome executable does not exist: ${this.config.chromeExecutablePath}`);
       }
       const browser = await chromium.launch({
         executablePath: this.config.chromeExecutablePath,
@@ -1184,7 +1228,7 @@ export class ChatGptBrowserWorker {
    */
   private async pageForNewTurn(): Promise<Page> {
     if (this.config.browserHost === "launcher") {
-      throw new Error("Launcher turns require an explicitly leased browser surface");
+      throw chatGptFatalSetupError("Launcher turns require an explicitly leased browser surface");
     }
     const { context } = await this.ensureManagedBrowser();
     return await context.newPage();
