@@ -129,18 +129,28 @@ describe("ChatGptMarkdownBuffer Responsiveness & Stability", () => {
     expect(final.markdown).toBe("Body text");
   });
 
+  /**
+   * A mismatch now has to persist before it is fatal: upstream added a recovery window so a DOM that
+   * reshuffles for a moment and puts the block back does not kill a turn. The failure itself is
+   * unchanged - a block that stays missing still fails closed rather than streaming on.
+   */
   test("fails closed if previously committed text block is removed or mutated", () => {
-    const buffer = new ChatGptMarkdownBuffer(m => m, 50);
+    const recoveryMs = 2_000;
+    const buffer = new ChatGptMarkdownBuffer(m => m, 50, recoveryMs);
 
     buffer.observe([{ key: "0", html: "<p>Alpha</p>", text: "Alpha", streamable: true }], 100);
     buffer.observe([{ key: "0", html: "<p>Alpha</p>", text: "Alpha", streamable: true }], 150);
 
+    // Inside the recovery window the mismatch is tolerated rather than thrown.
+    expect(buffer.observe([], 200)).toBe("");
     expect(() => {
-      buffer.observe([]);
+      buffer.observe([], 200 + recoveryMs);
     }).toThrow("ChatGPT removed a completed text block that was already streamed to Codex");
 
+    const mutated = [{ key: "0", html: "<p>Beta</p>", text: "Beta", streamable: true }];
+    expect(buffer.observe(mutated, 5_000)).toBe("");
     expect(() => {
-      buffer.observe([{ key: "0", html: "<p>Beta</p>", text: "Beta", streamable: true }]);
+      buffer.observe(mutated, 5_000 + recoveryMs);
     }).toThrow("ChatGPT changed a completed text block that was already streamed to Codex");
   });
 });

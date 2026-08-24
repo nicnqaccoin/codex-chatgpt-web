@@ -21,7 +21,7 @@ import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
-import { estimateChatGptWebUsage } from "./usage";
+import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 import {
   ChatGptLunaCheckpointStore,
@@ -77,15 +77,16 @@ export function chatGptWebHistoryIsCollapsing(omitted: number, carried: number):
  */
 const CHATGPT_PRESSURE_PROBE_TOKEN = "turn_00000000000000000000000000000000";
 
-function abortError(): DOMException {
+function abortError(signal?: AbortSignal): Error {
+  if (signal?.reason instanceof ChatGptWebAdapterError) return signal.reason;
   return new DOMException("ChatGPT web turn aborted", "AbortError");
 }
 
 function withAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (!signal) return promise;
-  if (signal.aborted) return Promise.reject(abortError());
+  if (signal.aborted) return Promise.reject(abortError(signal));
   return new Promise<T>((resolveWait, rejectWait) => {
-    const onAbort = () => rejectWait(abortError());
+    const onAbort = () => rejectWait(abortError(signal));
     signal.addEventListener("abort", onAbort, { once: true });
     promise.then(
       value => {
@@ -98,6 +99,47 @@ function withAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Pro
       },
     );
   });
+}
+
+function cancellableBrowserTurn(
+  run: Promise<string>,
+  controller: AbortController,
+): { browser: Promise<string>; cancel: (reason?: Error) => void } {
+  let rejectCancellation!: (error: Error) => void;
+  const cancellation = new Promise<never>((_resolve, reject) => {
+    rejectCancellation = reject;
+  });
+  let cancellationRejected = false;
+  return {
+    // Cancellation wins immediately even while the detached Playwright helper is still unwinding.
+    // The helper keeps the same abort signal and remains responsible for its normal end/cleanup
+    // handshake, but the Codex Responses turn no longer waits on that process cleanup.
+    browser: Promise.race([run, cancellation]),
+    cancel(reason?: Error) {
+      if (!controller.signal.aborted) controller.abort(reason);
+      // Explicit targeted cancellation ends the Codex Responses turn immediately. Generic
+      // retirement (client disconnect or compaction replacement) still waits for the helper's
+      // cleanup handshake before a replacement browser may start.
+      if (reason && !cancellationRejected) {
+        cancellationRejected = true;
+        rejectCancellation(reason);
+      }
+    },
+  };
+}
+
+export function chatGptWebExecutionNamespace(provider: CodexProviderConfig): string {
+  return createHash("sha256").update(JSON.stringify({
+    baseUrl: provider.baseUrl,
+    chatgptWeb: provider.chatgptWeb ?? {},
+  })).digest("hex");
+}
+
+export function chatGptWebTraceId(provider: CodexProviderConfig, parsed: CodexParsedRequest): string {
+  return createHash("sha256")
+    .update(`${chatGptWebExecutionNamespace(provider)}:${chatGptTurnExecutionKey(parsed)}`)
+    .digest("hex")
+    .slice(0, 12);
 }
 
 function structuredContent(text: string): unknown | undefined {
@@ -208,15 +250,16 @@ export function createChatGptWebAdapter(
   const worker = ChatGptBrowserWorker.forProvider(provider);
   const broker = dependencies.broker ?? TurnBroker.forSocket(brokerSocketPath(provider));
   const timeoutMs = provider.chatgptWeb?.turnTimeoutMs;
+  const experimentalBiggerContext = provider.chatgptWeb?.experimentalBiggerContext;
+  if (experimentalBiggerContext !== undefined && typeof experimentalBiggerContext !== "boolean") {
+    throw new Error("ChatGPT Bigger Context preference must be a boolean");
+  }
   const configuredCapabilities: ChatGptWebCapabilities = {
     localToolsEnabled: provider.chatgptWeb?.localToolsEnabled === true,
     solAvailable: provider.chatgptWeb?.solAvailable !== false,
     proAvailable: provider.chatgptWeb?.proAvailable === true,
   };
-  const executionNamespace = createHash("sha256").update(JSON.stringify({
-    baseUrl: provider.baseUrl,
-    chatgptWeb: provider.chatgptWeb ?? {},
-  })).digest("hex");
+  const executionNamespace = chatGptWebExecutionNamespace(provider);
   const environmentStore = new ChatGptThreadEnvironmentStore(
     provider.chatgptWeb?.threadEnvironmentStatePath
       ? resolve(expandUserPath(provider.chatgptWeb.threadEnvironmentStatePath))
@@ -268,6 +311,15 @@ export function createChatGptWebAdapter(
     const checkpointInput = checkpointEligible && (lunaTurn || historyCollapsing)
       ? lunaCheckpointStore.apply(parsed)
       : { parsed, applied: false };
+    const experimentalMultipartParts = experimentalBiggerContext
+      ? resolveBiggerContextMultipartParts(checkpointInput.parsed, turnCapabilities)
+      : undefined;
+    const compileOptions = {
+      captureLunaCheckpoint,
+      ...(experimentalMultipartParts !== undefined
+        ? { experimentalMultipartParts }
+        : {}),
+    };
     if (captureLunaCheckpoint) {
       console.info(
         `[chatgpt-web] rolling checkpoint capture=on applied=${checkpointInput.applied}`
@@ -370,7 +422,7 @@ export function createChatGptWebAdapter(
     const trace = new ChatGptTraceFeed();
     const text = new ChatGptTextFeed();
     if (!mode.localTools) {
-      const browser = finalizeCheckpoint(worker.run({
+      const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(worker.run({
         traceId,
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
@@ -380,7 +432,7 @@ export function createChatGptWebAdapter(
             promptInput,
             turnCapabilities,
             undefined,
-            { captureLunaCheckpoint },
+            compileOptions,
           ),
           release: () => {},
         }),
@@ -394,20 +446,20 @@ export function createChatGptWebAdapter(
           captureLunaCheckpoint: true,
           onLunaCheckpoint: captureCheckpoint,
         } : {}),
-      }));
+      })), browserAbort);
       return {
         mode: "read-only",
-        browser,
+        browser: browserTurn.browser,
         trace,
         text,
-        cancel: () => browserAbort.abort(),
+        cancel: browserTurn.cancel,
       };
     }
     if (!environment) throw new Error("Tool-capable ChatGPT web mode requires a trusted Codex environment");
     const token = deferred<string>();
     let tokenSettled = false;
     let activeToken: string | undefined;
-    const browser = finalizeCheckpoint(worker.run({
+    const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(worker.run({
       traceId,
       modelId: parsed.modelId,
       reasoning: parsed.options.reasoning,
@@ -426,7 +478,7 @@ export function createChatGptWebAdapter(
             promptInput,
             turnCapabilities,
             turnToken,
-            { captureLunaCheckpoint },
+            compileOptions,
           );
           return { ...compiled, release: () => {} };
         } catch (error) {
@@ -444,8 +496,8 @@ export function createChatGptWebAdapter(
         captureLunaCheckpoint: true,
         onLunaCheckpoint: captureCheckpoint,
       } : {}),
-    }));
-    void browser.catch(error => {
+    })), browserAbort);
+    void browserTurn.browser.catch(error => {
       if (!tokenSettled) {
         tokenSettled = true;
         token.reject(error instanceof Error ? error : new Error(String(error)));
@@ -454,13 +506,13 @@ export function createChatGptWebAdapter(
     return {
       mode: "tools",
       token: token.promise,
-      browser,
+      browser: browserTurn.browser,
       trace,
       text,
-      cancel: () => {
-        browserAbort.abort();
+      cancel: (reason?: Error) => {
+        browserTurn.cancel(reason);
         if (activeToken) {
-          void Promise.resolve(broker.revoke(activeToken)).catch(error => {
+          void Promise.resolve(broker.revoke(activeToken, reason)).catch(error => {
             console.error(`[chatgpt-web] failed to revoke cancelled turn token: ${error instanceof Error ? error.message : String(error)}`);
           });
         }
@@ -471,13 +523,6 @@ export function createChatGptWebAdapter(
   return {
     name: "chatgpt-web",
     async runTurn(parsed, incoming, emit) {
-      if (parsed._opaqueMultiAgentV2Payload) {
-        throw new Error(
-          "ChatGPT Web subagents currently require a V1-rooted task. "
-          + "Refresh the Codex model catalog and start a new task; an existing V2 task cannot migrate surfaces. "
-          + "Codex MultiAgent V2 encrypts cross-backend task payloads.",
-        );
-      }
       const turnCapabilities = parsed._compactionRequest
         ? { ...configuredCapabilities, localToolsEnabled: false }
         : configuredCapabilities;
@@ -517,6 +562,7 @@ export function createChatGptWebAdapter(
       const session = chatGptTurnSessions.getOrCreate(
         executionKey,
         () => startRuntime(parsed, environment, traceId, turnCapabilities),
+        traceId,
       );
       // A client that closes the stream looks the same whether the user pressed stop or the
       // connection blipped, so the session is deliberately kept alive for a reconnect to re-attach.
