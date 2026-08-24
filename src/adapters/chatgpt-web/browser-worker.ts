@@ -405,9 +405,14 @@ function divergenceDetail(expected: string, observed: string, at: number): strin
     const point = text.codePointAt(at);
     return point === undefined ? "none" : `U+${point.toString(16).toUpperCase().padStart(4, "0")}`;
   };
+  // A length mismatch means the composer dropped code units rather than substituting them, so the
+  // pair of slices around the divergence is what names the transformation. Without it the failure
+  // reports three counts and nothing about which characters actually differ, which is the whole
+  // question - and a deterministic mismatch retries to exhaustion answering none of it.
   return `, divergenceAt=${at}`
-    + ` expected=${JSON.stringify(expected.slice(at, at + 8))} ${codePoint(expected)}`
-    + ` actual=${JSON.stringify(observed.slice(at, at + 8))} ${codePoint(observed)}`;
+    + ` expected=${JSON.stringify(expected.slice(at, at + 12))} ${codePoint(expected)}`
+    + ` actual=${JSON.stringify(observed.slice(at, at + 12))} ${codePoint(observed)}`
+    + ` before=${JSON.stringify(expected.slice(Math.max(0, at - 12), at))}`;
 }
 
 /**
@@ -1615,7 +1620,8 @@ export class ChatGptBrowserWorker {
     throwIfPromptAttachmentAborted(abortSignal);
     const commonPrefix = this.promptEquivalentPrefixLength(prompt, observed);
     throw new ChatGptPromptAttachmentIntegrityError(
-      `ChatGPT composer did not preserve the complete prompt (expectedChars=${prompt.length}, actualChars=${observed.length}, commonPrefixChars=${commonPrefix})`,
+      `ChatGPT composer did not preserve the complete prompt (expectedChars=${prompt.length}, actualChars=${observed.length}, commonPrefixChars=${commonPrefix}`
+      + `${divergenceDetail(prompt, observed, commonPrefix)})`,
     );
   }
 
@@ -2010,7 +2016,8 @@ export class ChatGptBrowserWorker {
     const commonPrefix = this.promptEquivalentPrefixLength(expected, observed);
     throw new ChatGptPromptAttachmentIntegrityError(
       `ChatGPT composer did not commit a complete prompt insertion chunk`
-      + ` (expectedChars=${expected.length}, actualChars=${observed.length}, commonPrefixChars=${commonPrefix})`,
+      + ` (expectedChars=${expected.length}, actualChars=${observed.length}, commonPrefixChars=${commonPrefix}`
+      + `${divergenceDetail(expected, observed, commonPrefix)})`,
     );
   }
 

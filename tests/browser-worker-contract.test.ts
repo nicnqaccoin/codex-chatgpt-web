@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptSubmissionEvidence, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_PROMPT_INSERT_CHUNK_CHARS, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, assertChatGptWebInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptSubmissionEvidence, promptAttachmentFailure, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptNavigationAbortedRetryable, chatGptStageFailure } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
@@ -2056,4 +2056,23 @@ test("the stage runner applies that verdict to what escapes it", async () => {
     async () => { throw new Error("ChatGPT send button is disabled"); },
   ).then(() => undefined, (error: unknown) => error);
   expect(afterSend).not.toBeInstanceOf(ChatGptWebAdapterError);
+});
+
+/**
+ * The 50-image extraction died on expectedChars=31995, actualChars=31993, commonPrefixChars=15513 -
+ * three counts, retried to exhaustion, and not one word about which two characters the composer
+ * dropped. That is the whole question, and the failure has to answer it.
+ */
+test("an attachment mismatch names the characters, not just the counts", () => {
+  const expected = `${"a".repeat(20)}  trailing  \nnext line`;
+  const observed = `${"a".repeat(20)} trailing \nnext line`;
+  const failure = promptAttachmentFailure(expected, observed, "chunk");
+
+  expect(failure.message).toContain("commonPrefixChars=21");
+  expect(failure.message).toContain("divergenceAt=21");
+  // Both sides of the divergence, so the transformation can be read off the message itself.
+  expect(failure.message).toContain("expected=");
+  expect(failure.message).toContain("actual=");
+  expect(failure.message).toContain("before=");
+  expect(failure.message).toContain("U+0020");
 });
