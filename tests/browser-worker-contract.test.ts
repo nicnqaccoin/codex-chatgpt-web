@@ -2129,8 +2129,6 @@ test("visible reasoning keeps the browser turn healthy before final assistant ma
 // before submission, and the constants the deleted insertion-timing suite used to cover.
 import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
 import {
-  CHATGPT_MENU_ANIMATION_SETTLE_MS,
-  CHATGPT_UI_SETTLE_MS,
   CHATGPT_MIN_OPERATIONAL_VIEWPORT,
   chatGptNavigationAbortedRetryable,
   forceOperationalChatGptViewport,
@@ -2254,14 +2252,6 @@ test("an attachment mismatch names the characters, not just the counts", () => {
   expect(detail).toContain("U+0020");
 });
 
-/**
- * Kept from the deleted insertion-timing suite: the menu needs longer to settle than an ordinary UI
- * change, and both constants still exist even though the chunked insertion they lived beside is gone.
- */
-test("connector menu animation keeps more settle headroom than the composer", () => {
-  expect(CHATGPT_MENU_ANIMATION_SETTLE_MS).toBeGreaterThanOrEqual(500);
-  expect(CHATGPT_MENU_ANIMATION_SETTLE_MS).toBeGreaterThan(CHATGPT_UI_SETTLE_MS);
-});
 
 /**
  * A task that had already read twenty images died four times over on a surface whose viewport stayed

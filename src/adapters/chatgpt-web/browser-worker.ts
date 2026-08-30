@@ -1347,14 +1347,6 @@ export function chatGptPromptFilePayloads(
 export const CHATGPT_TURN_INACTIVITY_TIMEOUT_MS = 10 * 60_000;
 
 /**
- * The connector row is virtualized and keeps being replaced while the attachment menu's fill
- * animation runs, so its geometry is only final once that animation settles. Composer headroom is
- * not enough here: a bounding box read mid-animation is non-null but stale, and the trusted mouse
- * click then lands on a sibling row.
- */
-export const CHATGPT_MENU_ANIMATION_SETTLE_MS = 500;
-
-/**
  * An overlapping navigation makes Chromium abort this one before it reaches the network, so the
  * request never started and retrying is safe. Two was enough while every turn opened the temporary
  * chat url; rotating to a persistent chat navigates to the root instead, which aborted six times in
