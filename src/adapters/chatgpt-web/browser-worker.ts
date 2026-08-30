@@ -1588,10 +1588,10 @@ export class ChatGptBrowserWorker {
       return this.page;
     }
     if (!existsSync(this.config.storageStatePath) || !existsSync(loginVerificationMarkerPath(this.config.storageStatePath))) {
-      throw new Error(`ChatGPT web login state is missing: ${this.config.storageStatePath}`);
+      throw chatGptFatalSetupError(`ChatGPT web login state is missing: ${this.config.storageStatePath}`);
     }
     if (!existsSync(this.config.chromeExecutablePath)) {
-      throw new Error(`Configured Chrome executable does not exist: ${this.config.chromeExecutablePath}`);
+      throw chatGptFatalSetupError(`Configured Chrome executable does not exist: ${this.config.chromeExecutablePath}`);
     }
     this.browser = await chromium.launch({
       executablePath: this.config.chromeExecutablePath,
@@ -1606,10 +1606,10 @@ export class ChatGptBrowserWorker {
     if (this.managedBrowserReady) return this.managedBrowserReady;
     const opening = (async () => {
       if (!existsSync(this.config.storageStatePath) || !existsSync(loginVerificationMarkerPath(this.config.storageStatePath))) {
-        throw new Error(`ChatGPT web login state is missing: ${this.config.storageStatePath}`);
+        throw chatGptFatalSetupError(`ChatGPT web login state is missing: ${this.config.storageStatePath}`);
       }
       if (!existsSync(this.config.chromeExecutablePath)) {
-        throw new Error(`Configured Chrome executable does not exist: ${this.config.chromeExecutablePath}`);
+        throw chatGptFatalSetupError(`Configured Chrome executable does not exist: ${this.config.chromeExecutablePath}`);
       }
       const browser = await chromium.launch({
         executablePath: this.config.chromeExecutablePath,
@@ -1636,7 +1636,7 @@ export class ChatGptBrowserWorker {
    */
   private async pageForNewTurn(): Promise<Page> {
     if (this.config.browserHost === "launcher") {
-      throw new Error("Launcher turns require an explicitly leased browser surface");
+      throw chatGptFatalSetupError("Launcher turns require an explicitly leased browser surface");
     }
     const { context } = await this.ensureManagedBrowser();
     return await context.newPage();
