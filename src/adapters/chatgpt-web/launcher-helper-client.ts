@@ -365,7 +365,8 @@ export class LauncherBrowserHelperClient {
           error instanceof Error ? error : new Error(String(error)),
           pending,
         ));
-      }      else if (message.event === "luna_checkpoint") {
+      }
+      else if (message.event === "luna_checkpoint") {
         if (!pending.turn.captureLunaCheckpoint || !pending.turn.onLunaCheckpoint) {
           this.finishWithError(message.id, new Error("Launcher browser helper emitted an unexpected Luna checkpoint"));
           return;

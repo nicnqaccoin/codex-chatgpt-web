@@ -1318,10 +1318,6 @@ export const CHATGPT_MENU_ANIMATION_SETTLE_MS = 500;
  */
 export const CHATGPT_NAVIGATION_ABORT_RETRIES = 5;
 
-const settleChatGptMenuAnimation = (): Promise<void> => (
-  new Promise(resolveSettle => setTimeout(resolveSettle, CHATGPT_MENU_ANIMATION_SETTLE_MS))
-);
-
 /**
  * Both of these fail before anything reaches ChatGPT - the composer never accepted the text, or the
  * navigation was aborted before it reached the network - so running the whole turn again has no side
@@ -2207,7 +2203,8 @@ export class ChatGptBrowserWorker {
     throwIfPromptAttachmentAborted(abortSignal);
     const commonPrefix = this.promptEquivalentPrefixLength(prompt, observed);
     throw new ChatGptPromptAttachmentIntegrityError(
-      `ChatGPT composer did not preserve the complete prompt (expectedChars=${prompt.length}, actualChars=${observed.length}, commonPrefixChars=${commonPrefix})`,
+      `ChatGPT composer did not preserve the complete prompt (expectedChars=${prompt.length}, actualChars=${observed.length}, commonPrefixChars=${commonPrefix}`
+        + `${divergenceDetail(prompt, observed, commonPrefix)})`,
     );
   }
 
@@ -3538,6 +3535,13 @@ export class ChatGptBrowserWorker {
       await diagnostics.capture(page, "send-accepted");
 
       let lastHeartbeat = 0;
+      // Nothing bounds a turn that stops producing: only the user can end it, and one sat for ten
+      // minutes with nothing to stop it. This is an idle bound, not a total one - a turn still
+      // emitting text or trace blocks keeps its budget however long it runs.
+      let lastActivityAt = Date.now();
+      let lastObservedVisibleText = "";
+      let lastObservedTraceCount = 0;
+      let lastObservedTraceChars = 0;
       let finalText = "";
       let sawRunning = false;
       let loggedCompletionWait = false;
@@ -3577,6 +3581,14 @@ export class ChatGptBrowserWorker {
         }
         if (deadline !== undefined && Date.now() >= deadline) {
           throw new Error("ChatGPT web turn timed out");
+        }
+        if (Date.now() - lastActivityAt >= CHATGPT_TURN_INACTIVITY_TIMEOUT_MS) {
+          await diagnostics.capture(page, "turn-inactive");
+          throw new ChatGptWebAdapterError(
+            `ChatGPT produced nothing for ${Math.round(CHATGPT_TURN_INACTIVITY_TIMEOUT_MS / 60_000)} minutes.`
+            + " The browser turn was abandoned so it can be retried instead of waiting indefinitely.",
+            { status: 504, errorType: "server_error", code: "chatgpt_turn_inactive", retryable: true },
+          );
         }
         if (Date.now() - lastHeartbeat >= 10_000) {
           turn.onHeartbeat?.();
@@ -3669,6 +3681,18 @@ export class ChatGptBrowserWorker {
           for (const trace of visibleTrace.observe(snapshot.traceBlocks, snapshot.completionActionVisible)) {
             if (trace.kind === "commentary") turn.onCommentary?.(trace.text, trace.continuation === true);
             else turn.onReasoningSummary?.(trace.text, trace.continuation === true);
+          }
+          // Reasoning streams into a block that is already there, so counting blocks misses a long
+          // think entirely: measure the written characters, which moves either way.
+          const traceChars = snapshot.traceBlocks.reduce((total, block) => total + block.text.length, 0);
+          if (snapshot.visibleText !== lastObservedVisibleText
+            || snapshot.traceBlocks.length !== lastObservedTraceCount
+            || traceChars !== lastObservedTraceChars
+            || textDelta) {
+            lastObservedVisibleText = snapshot.visibleText;
+            lastObservedTraceCount = snapshot.traceBlocks.length;
+            lastObservedTraceChars = traceChars;
+            lastActivityAt = Date.now();
           }
           if (textDelta) emitMarkdownDelta(textDelta);
           const domError = domHealthTracker.update({

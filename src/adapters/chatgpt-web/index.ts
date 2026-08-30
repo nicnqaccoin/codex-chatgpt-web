@@ -50,12 +50,6 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reje
   return { promise, resolve: resolvePromise, reject: rejectPromise };
 }
 
-/**
- * How long a browser turn keeps running after its client goes away, so a Codex reconnect can
- * re-attach to the work in progress instead of paying for a fresh turn. Past it, an abandoned turn
- * is stopped rather than left generating an answer nobody will read.
- */
-const CHATGPT_CLIENT_ABANDON_GRACE_MS = 60_000;
 
 /**
  * When fit recovery is discarding this much of a turn's history, replaying a checkpoint the model
@@ -733,7 +727,8 @@ export function createChatGptWebAdapter(
         produce(event => events.push(event));
         emitRoundEvents(events);
       };
-      const emitRoundEvent = (event: AdapterEvent): void => emitRoundEvents([event]);      const heartbeat = setInterval(() => emit({ type: "heartbeat" }), 10_000);
+      const emitRoundEvent = (event: AdapterEvent): void => emitRoundEvents([event]);
+      const heartbeat = setInterval(() => emit({ type: "heartbeat" }), 10_000);
       try {
         emit({ type: "heartbeat" });
         await session.runExclusive(async () => {
@@ -920,10 +915,26 @@ export function createChatGptWebAdapter(
           throw error;
         }
         const turnError = submittedTurnFailure(session, error);
+        // An interruption is not a failure, which is why it used to be excluded - but a stage
+        // timeout arrives as an AbortError too, and excluding both left four failed attempts of one
+        // turn with no record at all while the log read as a clean run. Record both, marked, so an
+        // interruption still does not read as breakage and a timeout stops being invisible.
+        const aborted = turnError instanceof Error && turnError.name === "AbortError";
+        appendDiagnosticRecord("turn-failures.jsonl", {
+          traceId,
+          ...(aborted ? { aborted: true } : {}),
+          mode: session.runtime.mode,
+          classified: turnError instanceof ChatGptWebAdapterError,
+          retryable: turnError instanceof ChatGptWebAdapterError ? turnError.retryable : false,
+          code: turnError instanceof ChatGptWebAdapterError ? turnError.code : "unclassified",
+          name: turnError instanceof Error ? turnError.name : typeof turnError,
+          message: (turnError instanceof Error ? turnError.message : String(turnError)).slice(0, 400),
+        });
         const handledError = turnError instanceof ChatGptWebAdapterError && turnError.retryable
           ? chatGptWebTurnRetryPolicy.recordRetryableFailure(retryKey, turnError)
           : turnError;
-        if (!(turnError instanceof ChatGptWebAdapterError && turnError.retryable)) {          chatGptWebTurnRetryPolicy.clear(retryKey);
+        if (!(turnError instanceof ChatGptWebAdapterError && turnError.retryable)) {
+            chatGptWebTurnRetryPolicy.clear(retryKey);
         }
         if (handledError instanceof ChatGptWebAdapterError && !handledError.retryable) {
           // A deterministic request failure remains replayable so a native reconnect cannot burn
