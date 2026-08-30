@@ -14,6 +14,13 @@ export class LauncherBrowserTurnCancelledError extends Error {
   }
 }
 
+export class LauncherRetainedConversationUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LauncherRetainedConversationUnavailableError";
+  }
+}
+
 export interface LauncherBrowserHostDescriptor {
   version: 2;
   kind: typeof LAUNCHER_BROWSER_HOST_KIND;
@@ -296,7 +303,14 @@ export const LAUNCHER_SESSION_INSPECTION_TIMEOUT_MS = 30_000;
 export const LAUNCHER_CAPABILITY_INSPECTION_TIMEOUT_MS = 120_000;
 
 export type LauncherTurnActivity =
-  | { phase: "start"; traceId: string; helperPid: number }
+  | {
+      phase: "start";
+      traceId: string;
+      helperPid: number;
+      conversationKey?: string;
+      connectorIdentity?: string;
+      requireRetainedConversation?: boolean;
+    }
   | { phase: "heartbeat"; traceId: string; helperPid: number }
   | {
       phase: "end";
@@ -304,6 +318,8 @@ export type LauncherTurnActivity =
       helperPid: number;
       status: "completed" | "failed" | "aborted";
       message?: string;
+      retain?: boolean;
+      connectorBound?: boolean;
     };
 
 export const LAUNCHER_TURN_START_TIMEOUT_MS = 5_000;
@@ -319,7 +335,12 @@ export async function notifyLauncherTurn(
     : activity.phase === "heartbeat"
       ? LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS
       : LAUNCHER_TURN_START_TIMEOUT_MS,
-): Promise<{ surfaceId?: string; cancelledByUser?: boolean }> {
+): Promise<{
+  surfaceId?: string;
+  reused?: boolean;
+  connectorBound?: boolean;
+  cancelledByUser?: boolean;
+}> {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -340,6 +361,11 @@ export async function notifyLauncherTurn(
           typeof body.error === "string" ? body.error : `Browser turn ${activity.traceId} was cancelled by the user`,
         );
       }
+      if (response.status === 409 && body.code === "retained_conversation_unavailable") {
+        throw new LauncherRetainedConversationUnavailableError(
+          typeof body.error === "string" ? body.error : "The retained ChatGPT conversation is no longer available",
+        );
+      }
       const detail = typeof body.error === "string" ? body.error : "";
       throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
     }
@@ -348,7 +374,17 @@ export async function notifyLauncherTurn(
       if (typeof body.surfaceId !== "string" || !/^[A-Za-z0-9_-]{32}$/.test(body.surfaceId)) {
         throw new Error("Launcher browser control channel returned an invalid turn surface id");
       }
-      return { surfaceId: body.surfaceId };
+      if (typeof body.reused !== "boolean") {
+        throw new Error("Launcher browser control channel returned an invalid reuse state");
+      }
+      if (typeof body.connectorBound !== "boolean") {
+        throw new Error("Launcher browser control channel returned an invalid connector state");
+      }
+      return {
+        surfaceId: body.surfaceId,
+        reused: body.reused,
+        connectorBound: body.connectorBound,
+      };
     }
     if (activity.phase === "end") {
       if (typeof body.cancelledByUser !== "boolean") {
@@ -358,8 +394,43 @@ export async function notifyLauncherTurn(
     }
     return {};
   } catch (error) {
-    if (error instanceof LauncherBrowserTurnCancelledError) throw error;
+    if (error instanceof LauncherBrowserTurnCancelledError
+      || error instanceof LauncherRetainedConversationUnavailableError) throw error;
     throw new Error(`Launcher browser control channel failed: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function releaseLauncherRetainedConversation(
+  descriptorPath: string,
+  conversationKey: string,
+  timeoutMs = LAUNCHER_TURN_END_TIMEOUT_MS,
+): Promise<number> {
+  if (!/^[a-f0-9]{64}$/.test(conversationKey)) {
+    throw new Error("Launcher retained conversation key is invalid");
+  }
+  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${descriptor.control.endpoint}/v1/turn/release`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${descriptor.control.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ conversationKey }),
+      signal: controller.signal,
+    });
+    const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+    if (!response.ok || !Number.isSafeInteger(body.released) || Number(body.released) < 0) {
+      const detail = typeof body.error === "string" ? `: ${body.error}` : "";
+      throw new Error(`HTTP ${response.status}${detail}`);
+    }
+    return Number(body.released);
+  } catch (error) {
+    throw new Error(`Launcher retained conversation release failed: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     clearTimeout(timer);
   }

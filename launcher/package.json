@@ -1,6 +1,6 @@
 {
   "name": "codex-web-gpt-launcher",
-  "version": "3.0.2",
+  "version": "4.0.5",
   "private": true,
   "description": "Desktop control center for Codex ChatGPT Web",
   "author": "miuuyy",
@@ -8,6 +8,7 @@
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "bun run scripts/dev.cjs",
+    "audit": "bun audit",
     "typecheck": "tsc --noEmit",
     "build:renderer": "vite build",
     "build": "bun run typecheck && bun run build:renderer",
@@ -30,7 +31,7 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^5.2.0",
-    "electron": "41.7.1",
+    "electron": "41.10.7",
     "electron-builder": "^26.8.1",
     "typescript": "^5.9.3",
     "vite": "^6.0.0"
@@ -40,6 +41,9 @@
     "productName": "Codex Web GPT",
     "artifactName": "codex-web-gpt-${version}-${os}-${arch}.${ext}",
     "asar": true,
+    "asarUnpack": [
+      "assets/linux-appimage-runner.sh"
+    ],
     "directories": {
       "output": "release"
     },
@@ -47,6 +51,7 @@
       "dist/**",
       "electron/**",
       "assets/icon.png",
+      "assets/linux-appimage-runner.sh",
       "package.json"
     ],
     "extraResources": [

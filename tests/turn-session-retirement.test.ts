@@ -13,6 +13,9 @@ function deferredRuntime(): { runtime: ChatGptTurnRuntime; release: () => void; 
     browser,
     trace: {},
     text: {},
+    // The session now waits on the tab actually being released, not just on the answer, so a runtime
+    // without this settles nothing and the retirement under test never completes.
+    physicalSettlement: browser.then(() => undefined, () => undefined),
     cancel: () => {
       cancelled = true;
     },

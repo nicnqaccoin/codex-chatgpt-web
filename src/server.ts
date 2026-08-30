@@ -4,6 +4,7 @@ import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker
 import { timingSafeEqual } from "node:crypto";
 import { chatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
 import { chatGptBrowserTabClosedError } from "./adapters/chatgpt-web/adapter-error";
+import { CHATGPT_TURN_REVISION_CONFLICT_MESSAGE } from "./adapters/chatgpt-web/environment";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
 import { providerConfig } from "./config";
@@ -37,6 +38,67 @@ import type { CodexProviderConfig } from "./types";
 import type { ProviderAdapter } from "./adapters/base";
 import { VERSION } from "./version";
 
+type HttpTrackedEndpoint = "models" | "responses" | "compact" | "search" | "unspecified";
+
+export interface HttpStreamFailureEvidence {
+  httpTurnId: number;
+  endpoint: HttpTrackedEndpoint;
+  reader: "client" | "windows_lifecycle";
+  platform: NodeJS.Platform;
+  chunks: number;
+  bytes: number;
+  errorName: string;
+  errorCode: string;
+}
+
+type HttpStreamFailureReporter = (evidence: HttpStreamFailureEvidence) => void;
+
+function safeStreamErrorField(value: unknown, fallback: string): string {
+  return typeof value === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(value)
+    ? value
+    : fallback;
+}
+
+function streamFailureEvidence(
+  error: unknown,
+  httpTurnId: number,
+  endpoint: HttpTrackedEndpoint,
+  reader: HttpStreamFailureEvidence["reader"],
+  platform: NodeJS.Platform,
+  chunks: number,
+  bytes: number,
+): HttpStreamFailureEvidence {
+  const candidate = error !== null && typeof error === "object"
+    ? error as { name?: unknown; code?: unknown }
+    : {};
+  return {
+    httpTurnId,
+    endpoint,
+    reader,
+    platform,
+    chunks,
+    bytes,
+    errorName: safeStreamErrorField(candidate.name, "Error"),
+    errorCode: safeStreamErrorField(candidate.code, "unknown"),
+  };
+}
+
+const reportHttpStreamFailure: HttpStreamFailureReporter = evidence => {
+  console.warn(`[codex-chatgpt-web] http_stream_failed ${JSON.stringify(evidence)}`);
+};
+
+function emitHttpStreamFailure(
+  reporter: HttpStreamFailureReporter,
+  evidence: HttpStreamFailureEvidence,
+): void {
+  try {
+    reporter(evidence);
+  } catch {
+    // Diagnostics are a side channel: they must never replace the source stream error or retain
+    // HTTP turn ownership after the client has already observed that failure.
+  }
+}
+
 export class HttpTurnCounter {
   private readonly active = new Map<number, {
     abort: AbortController;
@@ -44,6 +106,8 @@ export class HttpTurnCounter {
     finish: () => void;
   }>();
   private nextId = 1;
+
+  constructor(private readonly reportStreamFailure: HttpStreamFailureReporter = reportHttpStreamFailure) {}
 
   count(): number {
     return this.active.size;
@@ -62,6 +126,7 @@ export class HttpTurnCounter {
     run: (signal: AbortSignal) => Promise<Response>,
     clientSignal?: AbortSignal,
     platform: NodeJS.Platform = process.platform,
+    endpoint: HttpTrackedEndpoint = "unspecified",
   ): Promise<Response> {
     const id = this.nextId++;
     const abort = new AbortController();
@@ -103,6 +168,9 @@ export class HttpTurnCounter {
         // pull chain: it keeps HTTP backpressure native and lets a client body cancellation reach
         // the original SSE reader without an eagerly drained tee branch racing the socket writer.
         const reader = response.body.getReader();
+        const reportStreamFailure = this.reportStreamFailure;
+        let chunks = 0;
+        let bytes = 0;
         streamAbortListener = () => {
           void reader.cancel(abort.signal.reason).catch(() => {}).finally(release);
         };
@@ -116,8 +184,21 @@ export class HttpTurnCounter {
                 controller.close();
                 return;
               }
+              chunks += 1;
+              bytes += chunk.value.byteLength;
               controller.enqueue(chunk.value);
             } catch (error) {
+              if (!abort.signal.aborted) {
+                emitHttpStreamFailure(reportStreamFailure, streamFailureEvidence(
+                  error,
+                  id,
+                  endpoint,
+                  "client",
+                  platform,
+                  chunks,
+                  bytes,
+                ));
+              }
               release();
               controller.error(error);
             }
@@ -143,6 +224,8 @@ export class HttpTurnCounter {
       // when the client disconnects and cancels the observer branch.
       const [clientBody, lifecycleBody] = response.body.tee();
       const reader = lifecycleBody.getReader();
+      let chunks = 0;
+      let bytes = 0;
       streamAbortListener = () => {
         void Promise.allSettled([
           reader.cancel(abort.signal.reason),
@@ -152,10 +235,25 @@ export class HttpTurnCounter {
       abort.signal.addEventListener("abort", streamAbortListener, { once: true });
       void (async () => {
         try {
-          while (!(await reader.read()).done) {
+          for (;;) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            chunks += 1;
+            bytes += chunk.value.byteLength;
             // Consume eagerly so the lifecycle branch never backpressures the client branch.
           }
-        } catch {
+        } catch (error) {
+          if (!abort.signal.aborted) {
+            emitHttpStreamFailure(this.reportStreamFailure, streamFailureEvidence(
+              error,
+              id,
+              endpoint,
+              "windows_lifecycle",
+              platform,
+              chunks,
+              bytes,
+            ));
+          }
           // Stream failure is delivered to the client branch; lifecycle cleanup stays best-effort.
         } finally {
           release();
@@ -185,12 +283,7 @@ export interface ResponseRequestOptions {
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
   const route = requireChatGptWebModelRoute(parsed.modelId, config);
   parsed.modelId = route.backendModel;
-  // A Pro task remains Pro, but its isolated summarization turn does not benefit from Pro's much
-  // slower reasoning. Extra High has the same 95k pre-compaction budget on a Pro account, so it
-  // can summarize the complete bounded input without changing the task's selected model.
-  parsed.options.reasoning = parsed._compactionRequest && route.adapterEffort === "max"
-    ? "xhigh"
-    : route.adapterEffort;
+  parsed.options.reasoning = route.adapterEffort;
   return route;
 }
 
@@ -323,17 +416,25 @@ export async function responseRequest(
   }
 
   const provider = providerConfig(config);
-  let cancelledError: Error | undefined;
+  let traceId: string | undefined;
   try {
-    cancelledError = chatGptTurnSessions.cancelledError(chatGptWebTraceId(provider, parsed));
+    traceId = chatGptWebTraceId(provider, parsed);
   } catch (error) {
     // A cancelled browser session can only exist after the adapter accepted canonical native
     // turn identity and user-revision metadata. Requests without that identity have no matching
     // trace tombstone; preserve the adapter's existing strict validation/error path below.
     const message = error instanceof Error ? error.message : String(error);
+    if (message === CHATGPT_TURN_REVISION_CONFLICT_MESSAGE) {
+      // Codex can reopen an interrupted task with only refreshed developer/skill context under a
+      // new turn_id. Its last human prompt still belongs to the stopped turn and must not be
+      // replayed as new work. HTTP 400 makes that malformed recovery request terminal instead of
+      // allowing Codex to retry it as an upstream 502.
+      return formatErrorResponse(400, "invalid_request_error", message);
+    }
     if (!message.includes("requires native Codex turn_id metadata")
       && !message.includes("requires a current-turn user message")) throw error;
   }
+  const cancelledError = traceId ? chatGptTurnSessions.cancelledError(traceId) : undefined;
   if (cancelledError) {
     // Codex retries unknown streamed response.failed codes. A replay after the user explicitly
     // closed the only browser document is instead a terminal client state: repeating that exact
@@ -666,7 +767,7 @@ export function startServer(
             lastSuccessfulModelCatalogRequestAt = new Date().toISOString();
           }
           return response;
-        }, req.signal);
+        }, req.signal, process.platform, "models");
       }
       if (req.method === "GET" && url.pathname === "/v1/responses") {
         return new Response("Responses WebSocket transport is not enabled on this local route", {
@@ -676,17 +777,29 @@ export function startServer(
       }
       if (req.method === "POST" && url.pathname === "/v1/responses") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
-        return httpTurns.track(signal => responseRequest(new Request(req, { signal }), config), req.signal);
+        return httpTurns.track(
+          signal => responseRequest(new Request(req, { signal }), config),
+          req.signal,
+          process.platform,
+          "responses",
+        );
       }
       if (req.method === "POST" && url.pathname === "/v1/responses/compact") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
-        return httpTurns.track(signal => compactRequest(new Request(req, { signal }), config), req.signal);
+        return httpTurns.track(
+          signal => compactRequest(new Request(req, { signal }), config),
+          req.signal,
+          process.platform,
+          "compact",
+        );
       }
       if (req.method === "POST" && url.pathname === "/v1/alpha/search") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
         return httpTurns.track(
           signal => nativeSearchRequest(new Request(req, { signal }), dependencies.fetchUpstream),
           req.signal,
+          process.platform,
+          "search",
         );
       }
       return new Response("Not found", { status: 404 });

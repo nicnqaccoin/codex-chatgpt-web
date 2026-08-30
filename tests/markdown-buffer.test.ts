@@ -53,25 +53,6 @@ describe("ChatGptMarkdownBuffer Responsiveness & Stability", () => {
 
   // ChatGPT rewrites finished blocks while it hydrates controls and citations. A rewrite that never
   // reaches the Markdown cannot change what a commit emits, so it must not restart the wait.
-  test("a cosmetic HTML rewrite does not restart the stability window", () => {
-    const buffer = new ChatGptMarkdownBuffer(m => m, 750);
-    const t0 = 1000;
-    const tail: ChatGptMarkdownSegment = { key: "1", html: "<p>tail</p>", text: "tail", streamable: false };
-    const first: ChatGptMarkdownSegment[] = [
-      { key: "0", html: "<p>Settled paragraph</p>", text: "Settled paragraph", streamable: true },
-      tail,
-    ];
-    expect(buffer.observe(first, t0)).toBe("");
-
-    const reskinned: ChatGptMarkdownSegment[] = [
-      { key: "0", html: '<p class="mt-2 hydrated">Settled paragraph</p>', text: "Settled paragraph", streamable: true },
-      tail,
-    ];
-    expect(buffer.observe(reskinned, t0 + 700)).toBe("");
-    // Still committed on the original block's own deadline rather than 750ms after the reskin.
-    expect(buffer.observe(reskinned, t0 + 750)).toBe("Settled paragraph");
-  });
-
   test("handles list items within a group using single newline separators", () => {
     const buffer = new ChatGptMarkdownBuffer(m => m, 100);
 
@@ -130,27 +111,36 @@ describe("ChatGptMarkdownBuffer Responsiveness & Stability", () => {
   });
 
   /**
-   * A mismatch now has to persist before it is fatal: upstream added a recovery window so a DOM that
-   * reshuffles for a moment and puts the block back does not kill a turn. The failure itself is
-   * unchanged - a block that stays missing still fails closed rather than streaming on.
+   * A Responses delta cannot be retracted, so text already streamed to Codex has to stay true. The
+   * contract for saying so moved: observe records an inconsistent snapshot and emits nothing rather
+   * than throwing, and finish is where it becomes fatal. Upstream ships no markdown tests at all, so
+   * this is the only cover the guarantee has.
    */
-  test("fails closed if previously committed text block is removed or mutated", () => {
-    const recoveryMs = 2_000;
-    const buffer = new ChatGptMarkdownBuffer(m => m, 50, recoveryMs);
+  test("fails closed when ChatGPT changes a block it already streamed", () => {
+    const buffer = new ChatGptMarkdownBuffer(m => m, 50);
+
+    buffer.observe([{ key: "0", html: "<p>Alpha</p>", text: "Alpha", streamable: true }], 100);
+    expect(buffer.observe([{ key: "0", html: "<p>Alpha</p>", text: "Alpha", streamable: true }], 150)).toBe("Alpha");
+    expect(buffer.currentSnapshotIsConsistent()).toBeTrue();
+
+    // The rewritten block emits nothing and marks the snapshot bad rather than streaming a
+    // correction Codex could not apply.
+    expect(buffer.observe([{ key: "0", html: "<p>Beta</p>", text: "Beta", streamable: true }], 200)).toBe("");
+    expect(buffer.currentSnapshotIsConsistent()).toBeFalse();
+    expect(() => buffer.finish()).toThrow("already streamed to Codex");
+  });
+
+  /**
+   * A DOM that drops every block is not the same failure: nothing new is emitted and the text already
+   * committed still stands, so the turn is allowed to finish on what Codex has.
+   */
+  test("a disappearing block emits nothing rather than failing the turn", () => {
+    const buffer = new ChatGptMarkdownBuffer(m => m, 50);
 
     buffer.observe([{ key: "0", html: "<p>Alpha</p>", text: "Alpha", streamable: true }], 100);
     buffer.observe([{ key: "0", html: "<p>Alpha</p>", text: "Alpha", streamable: true }], 150);
 
-    // Inside the recovery window the mismatch is tolerated rather than thrown.
     expect(buffer.observe([], 200)).toBe("");
-    expect(() => {
-      buffer.observe([], 200 + recoveryMs);
-    }).toThrow("ChatGPT removed a completed text block that was already streamed to Codex");
-
-    const mutated = [{ key: "0", html: "<p>Beta</p>", text: "Beta", streamable: true }];
-    expect(buffer.observe(mutated, 5_000)).toBe("");
-    expect(() => {
-      buffer.observe(mutated, 5_000 + recoveryMs);
-    }).toThrow("ChatGPT changed a completed text block that was already streamed to Codex");
+    expect(buffer.finish().markdown).toBe("Alpha");
   });
 });

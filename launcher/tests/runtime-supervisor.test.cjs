@@ -26,10 +26,10 @@ async function freePort() {
   });
 }
 
-async function localHealthServer(statusForPath = () => 200) {
+async function localHealthServer(statusForPath = () => 200, bodyForPath = () => "ok") {
   const server = http.createServer((request, response) => {
     response.writeHead(statusForPath(request.url || "/"));
-    response.end("ok");
+    response.end(bodyForPath(request.url || "/"));
   });
   await new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -85,8 +85,9 @@ test("Linux autostart launches the durable AppImage invisibly", () => {
   );
   assert.match(
     entry,
-    /^Exec=\/usr\/bin\/env APPIMAGE_EXTRACT_AND_RUN=1 CODEX_WEB_GPT_APPIMAGE="\/home\/example\/Applications\/Codex Web GPT\.AppImage" "\/home\/example\/Applications\/Codex Web GPT\.AppImage" --hidden$/m,
+    /^Exec="\/home\/example\/Applications\/Codex Web GPT\.AppImage" --hidden$/m,
   );
+  assert.doesNotMatch(entry, /APPIMAGE_EXTRACT_AND_RUN/);
   assert.match(entry, /^Terminal=false$/m);
   assert.match(entry, /^X-GNOME-Autostart-enabled=true$/m);
 });
@@ -96,7 +97,6 @@ test("Linux autostart escapes desktop-entry field codes in executable paths", ()
     { getPath: () => "/tmp/transient-electron" },
     "/home/example/100% ready/Codex Web GPT.AppImage",
   );
-  assert.match(entry, /CODEX_WEB_GPT_APPIMAGE="\/home\/example\/100%% ready\/Codex Web GPT\.AppImage"/);
   assert.match(entry, /"\/home\/example\/100%% ready\/Codex Web GPT\.AppImage" --hidden/);
 });
 
@@ -105,7 +105,6 @@ test("Linux autostart follows the stable installer wrapper across app updates", 
   process.env.CODEX_WEB_GPT_LAUNCHER_EXECUTABLE = "/home/example/.local/bin/codex-web-gpt";
   try {
     const entry = linuxDesktopEntry({ getPath: () => "/tmp/versioned-appimage-mount" });
-    assert.match(entry, /CODEX_WEB_GPT_APPIMAGE="\/home\/example\/\.local\/bin\/codex-web-gpt"/);
     assert.match(entry, /"\/home\/example\/\.local\/bin\/codex-web-gpt" --hidden/);
   } finally {
     if (previous === undefined) delete process.env.CODEX_WEB_GPT_LAUNCHER_EXECUTABLE;
@@ -151,11 +150,12 @@ test("launcher runtime ownership cannot cross production and DEV profiles", () =
   );
 });
 
-test("DEV runtime supervision starts only the isolated MCP tunnel", async () => {
+test("DEV runtime supervision ignores launcher version mismatch and starts only the isolated MCP tunnel", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-dev-tunnel-supervisor-"));
   const descriptorPath = path.join(root, "runtime", "launcher-browser.json");
   fs.mkdirSync(path.dirname(descriptorPath), { recursive: true });
   const config = launcherConfig(descriptorPath, {
+    releaseVersion: "9.9.9",
     purpose: "dev-harness",
     mode: "full",
     appName: "Codex Native2 DEV",
@@ -566,6 +566,47 @@ test("an explicit local readiness failure remains actionable tunnel evidence", a
   }
 });
 
+test("recent internal MCP transport failures override false-green tunnel readiness", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-mcp-degraded-"));
+  const health = await localHealthServer(
+    () => 200,
+    pathname => pathname.startsWith("/api/logs")
+      ? JSON.stringify({
+        events: [{
+          time: new Date().toISOString(),
+          level: "WARN",
+          message: "dispatcher received MCP upstream error; posted error response to control plane",
+          attrs: {
+            failure_source: "client_internal",
+            status_code: 502,
+            upstream_response_received: false,
+            rpc_method: "initialize",
+          },
+        }],
+      })
+      : "ok",
+  );
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  supervisor.tunnel = { pid: process.pid, managed: true };
+  supervisor.tunnelHealthBaseUrl = health.baseUrl;
+  try {
+    const observation = await supervisor.readLocalTunnelHealth();
+    assert.equal(observation.ready, false);
+    assert.equal(observation.statusKnown, true);
+    assert.equal(observation.fatal, true);
+    assert.match(observation.detail, /MCP transport returned internal HTTP 502/);
+  } finally {
+    await health.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("tunnel readiness accepts the official tmux status without inventing a PID", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-health-tmux-"));
   const supervisor = new RuntimeSupervisor({
@@ -697,6 +738,75 @@ test("launcher adopts a healthy native managed tunnel without spawning a foregro
     assert.equal(monitors, 1);
     assert.equal(supervisor.tunnel?.pid, 123_456_778);
     assert.equal(supervisor.tunnel?.managed, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("tunnel recovery replaces a false-green managed runtime and proves the fresh MCP transport", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-managed-tunnel-recovery-"));
+  const binaryPath = path.join(root, "tunnel-client");
+  const runtimeKeyFile = path.join(root, "runtime.key");
+  const profileDir = path.join(root, "profiles");
+  fs.mkdirSync(profileDir, { recursive: true });
+  fs.writeFileSync(binaryPath, "binary");
+  fs.writeFileSync(runtimeKeyFile, "runtime-key");
+  fs.writeFileSync(path.join(profileDir, "codex-chatgpt-web.yaml"), "profile");
+  const config = {
+    mode: "full",
+    tunnel: {
+      binaryPath,
+      runtimeKeyFile,
+      profileDir,
+      profileName: "codex-chatgpt-web",
+    },
+  };
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+    launcherProfile: "development",
+  });
+  const events = [];
+  let reads = 0;
+  supervisor.readConfig = () => config;
+  supervisor.readTunnelHealth = async () => {
+    reads += 1;
+    return {
+      ready: true,
+      pid: reads === 1 ? 123_456_778 : 123_456_779,
+      statusKnown: true,
+      detail: "ready",
+    };
+  };
+  supervisor.runTunnelStopCommand = async () => {
+    events.push("stop");
+    return { code: 0, output: "{}" };
+  };
+  supervisor.waitForTunnelStopped = async () => {
+    events.push("stopped");
+  };
+  supervisor.runTunnelConnectCommand = async () => {
+    events.push("connect");
+    return { code: 0, output: "{}" };
+  };
+  supervisor.waitForTunnelMcpTransport = async () => {
+    events.push("mcp");
+  };
+  supervisor.startTunnelMonitor = () => { events.push("monitor"); };
+  supervisor.tryWriteState = () => true;
+  try {
+    await supervisor.recover("tunnel");
+    assert.deepEqual(events, [
+      "stop",
+      "stopped",
+      "connect",
+      "mcp",
+      "monitor",
+    ]);
+    assert.equal(supervisor.tunnel?.pid, 123_456_779);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -2,19 +2,13 @@ import type { Locator, Page } from "playwright-core";
 import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
 
 export const CHATGPT_TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
-/**
- * A normal chat, which unlike a Temporary Chat survives the turn. Only used when the transport
- * has been asked to keep one conversation per session; it is where such a session starts before
- * ChatGPT assigns the /c/<id> the following turns resume into.
- */
-export const CHATGPT_NEW_CHAT_URL = "https://chatgpt.com/";
 export const CHATGPT_COMPOSER_SELECTOR = [
   '[data-testid="prompt-textarea"]',
   "#prompt-textarea",
   '[contenteditable="true"][data-lexical-editor="true"]',
 ].join(", ");
 export const CHATGPT_EFFORT_CONTROL_SELECTOR = [
-  'button[aria-haspopup="menu"][data-tone="neutral"]:has([data-animated-slider-trigger="true"])',
+  'button[aria-haspopup="menu"][data-tone="neutral"]',
   'button[data-testid="model-switcher-dropdown-button"][aria-haspopup="menu"]',
 ].join(", ");
 export const CHATGPT_EFFORT_MENU_SELECTOR = [
@@ -134,30 +128,19 @@ export async function detectChatGptAccountCapabilities(
   if (!menuVisible && menuExpanded !== "true") await effortButton.press("Enter");
   try {
     const efforts = menu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
-    // ChatGPT's current slider keeps the ARIA value node hidden and moves
-    // keyboard interaction to the visible parent menuitem.  Treat the parent
-    // as the readiness/action target while reading min/max/value from the
-    // hidden semantic node.  Older slider markup uses the same ancestry, so
-    // this remains compatible with both layouts.
-    const slider = page.locator(CHATGPT_EFFORT_SLIDER_SELECTOR).last();
-    const sliderControl = slider
-      .locator("xpath=ancestor::*[@role='menuitem'][1]")
-      .last();
+    const slider = page.locator(CHATGPT_EFFORT_SLIDER_SELECTOR).filter({ visible: true }).last();
     const waitAbort = new AbortController();
     try {
       const ready = await Promise.race([
         efforts.first().waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal })
           .then(() => "items" as const),
-        slider.waitFor({ state: "attached", timeout: 70_000, signal: waitAbort.signal })
+        slider.waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal })
           .then(() => "slider" as const),
       ]);
-      if (ready === "items") {
+      const sliderVisible = ready === "slider" || await slider.isVisible().catch(() => false);
+      if (!sliderVisible) {
         return { solAvailable: true, proAvailable: await efforts.count() >= 5 };
       }
-      // The launcher may probe this surface while its embedded page has no layout viewport. The
-      // semantic slider is sufficient for capability detection; requiring visible geometry makes
-      // a valid authenticated session look unavailable after a background restart.
-      await sliderControl.waitFor({ state: "attached", timeout: 10_000 });
       const state = parseChatGptEffortSliderState(
         await slider.getAttribute("aria-valuemin"),
         await slider.getAttribute("aria-valuemax"),

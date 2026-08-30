@@ -90,7 +90,6 @@ export interface AppConfig {
    * Optional and off by default: absent means today's behaviour exactly, so an existing config
    * stays valid and the switch is also the way to A/B the two transports.
    */
-  persistentConversation?: boolean;
   controlToken: string;
   runtimeCommand: string[];
   acknowledgedUnofficialAt?: string;
@@ -359,11 +358,6 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (typeof parsed.autoApproveToolCalls !== "boolean") {
     throw new Error(`Invalid autoApproveToolCalls in ${path}`);
   }
-  // Absent is the default and must stay valid: every config written before this flag existed omits
-  // it, and omitting it has to mean the transport behaves exactly as it did then.
-  if (parsed.persistentConversation !== undefined && typeof parsed.persistentConversation !== "boolean") {
-    throw new Error(`Invalid persistentConversation in ${path}`);
-  }
   const requiredStrings: Array<keyof AppConfig> = [
     "appName", "chromeExecutablePath", "storageStatePath", "brokerSocketPath", "controlToken",
   ];
@@ -477,7 +471,6 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       proAvailable: config.proAvailable,
       experimentalBiggerContext: config.experimentalBiggerContext,
       autoApproveToolCalls: config.autoApproveToolCalls,
-      persistentConversation: config.persistentConversation === true,
     },
   };
 }
