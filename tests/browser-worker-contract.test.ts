@@ -2324,3 +2324,59 @@ test("the viewport wait forces the metrics before giving up", async () => {
   await expect(waitForOperationalChatGptViewport(stuck as never))
     .rejects.toThrow("forcing the metrics did not produce one either");
 });
+
+/**
+ * A hard prompt that ChatGPT deliberated over for more than a minute before rendering anything was
+ * declared dead while it was still writing - "did not create a response DOM after the message was
+ * sent", on a page that by then held half a million characters. Only a tool call extended the grace,
+ * so a plain generation had no way to say it was working.
+ */
+test("a visibly generating turn keeps its response grace", async () => {
+  const waitForNewAssistantTurn = (ChatGptBrowserWorker.prototype as unknown as {
+    waitForNewAssistantTurn(...args: unknown[]): Promise<{ identity: string }>;
+  }).waitForNewAssistantTurn;
+
+  const realDateNow = Date.now;
+  let now = realDateNow();
+  let polls = 0;
+  const context = {
+    // The stop button stays visible while ChatGPT works; the turn appears only well past the grace.
+    submissionDomState: async () => {
+      polls += 1;
+      now += 20_000;
+      return polls < 6
+        ? { userTurnCount: 1, assistantTurnCount: 0, visibleStopButtonCount: 1, userIdentities: [], responseIdentities: [] }
+        : { userTurnCount: 1, assistantTurnCount: 1, visibleStopButtonCount: 1, userIdentities: [], responseIdentities: ["turn_new"] };
+    },
+    waitForTurnDomOrExternalProgress: async () => {},
+  };
+  // The wait also probes for session and rate-limit alerts, so the locator has to be chainable.
+  const absent: Record<string, unknown> = {
+    filter: () => absent,
+    last: () => absent,
+    isVisible: async () => false,
+    getByRole: () => absent,
+  };
+  const page = {
+    isClosed: () => false,
+    locator: (selector: string) => ({ ...absent, selector }),
+    getByText: () => absent,
+  };
+
+  Date.now = () => now;
+  try {
+    const binding = await waitForNewAssistantTurn.call(
+      context,
+      page,
+      { initialResponseTurnIdentities: [], domCache: {} },
+      undefined,
+      undefined,
+      undefined,
+    );
+    // Six polls at twenty seconds each is a hundred seconds - well past the sixty second grace.
+    expect(binding.identity).toBe("turn_new");
+    expect(polls).toBe(6);
+  } finally {
+    Date.now = realDateNow;
+  }
+});

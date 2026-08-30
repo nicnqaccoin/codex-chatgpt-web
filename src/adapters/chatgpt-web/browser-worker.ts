@@ -2169,6 +2169,16 @@ export class ChatGptBrowserWorker {
         );
         continue;
       }
+      // A visible stop button means ChatGPT is working on this message, whether or not it has put
+      // anything in the DOM yet. Only a tool call used to extend the grace, so a hard prompt that
+      // ChatGPT deliberated over for more than a minute before rendering anything was declared dead
+      // while it was still writing. The idle bound still caps a surface that goes genuinely quiet.
+      if (state.visibleStopButtonCount > 0) {
+        responseDeadline = Math.min(
+          deadline ?? Number.POSITIVE_INFINITY,
+          Math.max(responseDeadline, Date.now() + CHATGPT_RESPONSE_DOM_GRACE_MS),
+        );
+      }
       const identity = chatGptNewTurnIdentity(
         baseline.initialResponseTurnIdentities,
         state.responseIdentities,
