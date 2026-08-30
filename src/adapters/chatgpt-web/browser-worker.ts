@@ -646,17 +646,61 @@ export async function withChatGptBrowserObservationTimeout<T>(
 
 export const CHATGPT_MIN_OPERATIONAL_VIEWPORT = Object.freeze({ width: 320, height: 240 });
 
-async function waitForOperationalChatGptViewport(page: Page, signal?: AbortSignal): Promise<void> {
+/** What we ask Chromium for when the host has not given the surface a usable one. */
+const CHATGPT_FORCED_VIEWPORT = Object.freeze({ width: 1_280, height: 800 });
+
+/**
+ * Waiting on the host to publish a viewport leaves the turn with no move when it does not: the
+ * launcher promises 800x600 for a hidden turn, and a task that had already read twenty images died
+ * four times over on a surface that stayed at zero. The page is reachable over CDP, so ask Chromium
+ * for the metrics directly rather than waiting on someone else to.
+ *
+ * The session is deliberately left attached: an emulation override lives on its CDP session and is
+ * dropped the moment that session detaches. Playwright disposes it with the page, and every turn
+ * opens its own page, so the lifetime is the turn.
+ */
+export async function forceOperationalChatGptViewport(page: Page): Promise<boolean> {
   try {
-    await withBrowserTurnAbort(page.waitForFunction(
-      ({ width, height }) => innerWidth >= width && innerHeight >= height,
-      CHATGPT_MIN_OPERATIONAL_VIEWPORT,
-      { polling: 50, timeout: 10_000 },
-    ), signal);
+    const session = await page.context().newCDPSession(page);
+    await session.send("Emulation.setDeviceMetricsOverride", {
+      width: CHATGPT_FORCED_VIEWPORT.width,
+      height: CHATGPT_FORCED_VIEWPORT.height,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function waitForOperationalChatGptViewport(page: Page, signal?: AbortSignal): Promise<void> {
+  const operational = (timeout: number): Promise<unknown> => withBrowserTurnAbort(page.waitForFunction(
+    ({ width, height }) => innerWidth >= width && innerHeight >= height,
+    CHATGPT_MIN_OPERATIONAL_VIEWPORT,
+    { polling: 50, timeout },
+  ), signal);
+  try {
+    await operational(10_000);
+    return;
   } catch (error) {
     if (signal?.aborted) throw new DOMException("ChatGPT browser page acquisition aborted", "AbortError");
+    const forced = await forceOperationalChatGptViewport(page);
+    if (forced) {
+      try {
+        await operational(5_000);
+        return;
+      } catch (secondError) {
+        if (signal?.aborted) throw new DOMException("ChatGPT browser page acquisition aborted", "AbortError");
+        throw new Error(
+          "ChatGPT browser surface did not expose an operational viewport, and forcing the metrics did not"
+          + ` produce one either: ${secondError instanceof Error ? secondError.message : String(secondError)}`,
+        );
+      }
+    }
     throw new Error(
-      `ChatGPT browser surface did not expose an operational viewport: ${error instanceof Error ? error.message : String(error)}`,
+      `ChatGPT browser surface did not expose an operational viewport: ${error instanceof Error ? error.message : String(error)}`
+      + "; the metrics override was rejected, so the surface is not reachable over CDP",
     );
   }
 }

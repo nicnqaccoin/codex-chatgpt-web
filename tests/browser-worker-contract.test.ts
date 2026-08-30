@@ -2131,7 +2131,10 @@ import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-erro
 import {
   CHATGPT_MENU_ANIMATION_SETTLE_MS,
   CHATGPT_UI_SETTLE_MS,
+  CHATGPT_MIN_OPERATIONAL_VIEWPORT,
   chatGptNavigationAbortedRetryable,
+  forceOperationalChatGptViewport,
+  waitForOperationalChatGptViewport,
   chatGptStageFailure,
   divergenceDetail,
 } from "../src/adapters/chatgpt-web/browser-worker";
@@ -2258,4 +2261,66 @@ test("an attachment mismatch names the characters, not just the counts", () => {
 test("connector menu animation keeps more settle headroom than the composer", () => {
   expect(CHATGPT_MENU_ANIMATION_SETTLE_MS).toBeGreaterThanOrEqual(500);
   expect(CHATGPT_MENU_ANIMATION_SETTLE_MS).toBeGreaterThan(CHATGPT_UI_SETTLE_MS);
+});
+
+/**
+ * A task that had already read twenty images died four times over on a surface whose viewport stayed
+ * at zero, while the launcher's contract says a hidden turn gets 800x600. Waiting on the host left
+ * the turn with no move; the page is reachable over CDP, so it can ask Chromium itself.
+ */
+test("a surface with no viewport is given one instead of failing the turn", async () => {
+  const waitForOperational = (ChatGptBrowserWorker.prototype as unknown as Record<string, unknown>);
+  void waitForOperational;
+
+  const sent: Array<{ method: string; params: unknown }> = [];
+  const session = {
+    send: async (method: string, params: unknown) => { sent.push({ method, params }); },
+  };
+
+  expect(await forceOperationalChatGptViewport({
+    context: () => ({ newCDPSession: async () => session }),
+  } as never)).toBeTrue();
+  expect(sent).toHaveLength(1);
+  expect(sent[0]!.method).toBe("Emulation.setDeviceMetricsOverride");
+  // Whatever is asked for has to clear the minimum the turn checks for, or forcing it is theatre.
+  const params = sent[0]!.params as { width: number; height: number };
+  expect(params.width).toBeGreaterThanOrEqual(CHATGPT_MIN_OPERATIONAL_VIEWPORT.width);
+  expect(params.height).toBeGreaterThanOrEqual(CHATGPT_MIN_OPERATIONAL_VIEWPORT.height);
+
+  // A surface that cannot be driven over CDP says so rather than throwing out of the helper.
+  expect(await forceOperationalChatGptViewport({
+    context: () => ({ newCDPSession: async () => { throw new Error("not attachable"); } }),
+  } as never)).toBeFalse();
+});
+
+/**
+ * Testing the helper alone passes whether or not the wait ever calls it - the mistake that shipped a
+ * green test for an unwired fix twice in this file. This drives the wait.
+ */
+test("the viewport wait forces the metrics before giving up", async () => {
+  let attempts = 0;
+  let overridden = false;
+  const page = {
+    waitForFunction: async () => {
+      attempts += 1;
+      // The host never publishes one; only the forced override makes the surface usable.
+      if (!overridden) throw new Error("Timeout 10000ms exceeded");
+      return true;
+    },
+    context: () => ({
+      newCDPSession: async () => ({ send: async () => { overridden = true; } }),
+    }),
+  };
+
+  await waitForOperationalChatGptViewport(page as never);
+  expect(overridden).toBeTrue();
+  expect(attempts).toBe(2);
+
+  // A surface that stays unusable after the override says both halves failed rather than one.
+  const stuck = {
+    waitForFunction: async () => { throw new Error("Timeout 10000ms exceeded"); },
+    context: () => ({ newCDPSession: async () => ({ send: async () => {} }) }),
+  };
+  await expect(waitForOperationalChatGptViewport(stuck as never))
+    .rejects.toThrow("forcing the metrics did not produce one either");
 });
