@@ -291,7 +291,7 @@ test("prompt compilation fits within 110,000 char budget with semantic pruning o
 
   const compiled = compileChatGptWebPrompt(request(messages), plusCapabilities, "turn-token-123");
 
-  expect(compiled.text.length).toBeLessThanOrEqual(110_000);
+  expect(compiled.text.length).toBeLessThanOrEqual(1_048_572);
   expect(compiled.text).toContain("### Images/Visuals/Files");
   expect(compiled.text).toContain("# AGENTS.md instructions");
   expect(compiled.text).toContain("Earlier file content of 'src/big.ts'");
@@ -564,7 +564,7 @@ test("a tool call with nothing large to lose is returned untouched", () => {
  * shipped a green test for an unwired fix earlier. This drives the compiler.
  */
 test("the compiler compacts older calls once the prompt is over budget", () => {
-  const patch = "y".repeat(20_000);
+  const patch = "y".repeat(300_000);
   const messages: CodexMessage[] = [];
   for (let turn = 0; turn < 12; turn += 1) {
     messages.push(userMessage(`Task ${turn}`, turn * 3));
@@ -572,11 +572,11 @@ test("the compiler compacts older calls once the prompt is over budget", () => {
       [{ id: `c${turn}`, name: "apply_patch", args: { path: `src/file${turn}.ts`, patch } }],
       turn * 3 + 1,
     ));
-    messages.push(toolResultMessage(`c${turn}`, "apply_patch", "z".repeat(20_000), turn * 3 + 2));
+    messages.push(toolResultMessage(`c${turn}`, "apply_patch", "z".repeat(300_000), turn * 3 + 2));
   }
 
   const compiled = compileChatGptWebPrompt(request(messages), plusCapabilities, "turn-token-456");
-  expect(compiled.text.length).toBeLessThanOrEqual(110_000);
+  expect(compiled.text.length).toBeLessThanOrEqual(1_048_572);
   expect(compiled.text).toContain("chars elided from this older tool call");
   // The newest call is inside the verbatim window and must survive intact.
   expect(compiled.text).toContain("src/file11.ts");

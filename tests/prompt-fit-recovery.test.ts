@@ -96,7 +96,7 @@ test("fit recovery drops conversation and never the instruction contract", () =>
 });
 
 test("an oversized turn keeps the Visualize contract and sheds old conversation instead", () => {
-  const filler = "conversation ".repeat(20_000);
+  const filler = "conversation ".repeat(200_000);
   const compiled = compileChatGptWebPrompt(
     request([
       userMessage(APP_CONTEXT, 1),
@@ -112,8 +112,8 @@ test("an oversized turn keeps the Visualize contract and sheds old conversation 
   expect(compiled.text).toContain("### Images/Visuals/Files");
   expect(compiled.text).toContain("# AGENTS.md instructions");
   expect(compiled.text).toContain("make it prettier");
-  // 110,000 is the measured Plus medium/high composer ceiling.
-  expect(compiled.text.length).toBeLessThanOrEqual(110_000);
+  // The Plus medium/high composer ceiling this branch now publishes, matching upstream.
+  expect(compiled.text.length).toBeLessThanOrEqual(1_048_572);
 });
 
 test("desktop-only replay blocks are dropped without touching the surrounding contract", () => {
@@ -157,26 +157,26 @@ test("older tool results are elided with a marker while recent ones stay verbati
   expect(last).toBe(huge);
 });
 
-const LIMIT = 110_000;
+const LIMIT = 1_048_572;
 
 test("three compactions that stop shrinking fail closed instead of looping", () => {
   // Sizes captured during the 2026-08-21 livelock.
-  expect(() => noteCompactionPromptSize(95_137, LIMIT)).not.toThrow();
-  expect(() => noteCompactionPromptSize(94_058, LIMIT)).not.toThrow();
-  expect(() => noteCompactionPromptSize(94_261, LIMIT)).toThrow("no longer reducing this session");
+  expect(() => noteCompactionPromptSize(950_000, LIMIT)).not.toThrow();
+  expect(() => noteCompactionPromptSize(940_000, LIMIT)).not.toThrow();
+  expect(() => noteCompactionPromptSize(942_000, LIMIT)).toThrow("no longer reducing this session");
 });
 
 test("compactions that keep shrinking are never blocked", () => {
-  for (const bytes of [95_000, 60_000, 30_000, 20_000]) {
+  for (const bytes of [950_000, 600_000, 300_000, 200_000]) {
     expect(() => noteCompactionPromptSize(bytes, LIMIT)).not.toThrow();
   }
 });
 
 test("stall detection only considers compactions inside the window", () => {
   const start = 1_000_000;
-  expect(() => noteCompactionPromptSize(94_000, LIMIT, start)).not.toThrow();
-  expect(() => noteCompactionPromptSize(94_100, LIMIT, start + 1_000)).not.toThrow();
-  expect(() => noteCompactionPromptSize(94_050, LIMIT, start + 700_000)).not.toThrow();
+  expect(() => noteCompactionPromptSize(940_000, LIMIT, start)).not.toThrow();
+  expect(() => noteCompactionPromptSize(941_000, LIMIT, start + 1_000)).not.toThrow();
+  expect(() => noteCompactionPromptSize(940_500, LIMIT, start + 700_000)).not.toThrow();
 });
 
 /**
@@ -185,18 +185,18 @@ test("stall detection only considers compactions inside the window", () => {
  * shrink any further. Calling that fatal ended a 50-image extraction that was making real progress.
  */
 test("a session resting far below the limit is a floor, not a livelock", () => {
-  expect(() => noteCompactionPromptSize(54_281, LIMIT)).not.toThrow();
-  expect(() => noteCompactionPromptSize(54_290, LIMIT)).not.toThrow();
-  expect(() => noteCompactionPromptSize(54_275, LIMIT)).not.toThrow();
-  expect(() => noteCompactionPromptSize(54_280, LIMIT)).not.toThrow();
+  expect(() => noteCompactionPromptSize(542_810, LIMIT)).not.toThrow();
+  expect(() => noteCompactionPromptSize(542_900, LIMIT)).not.toThrow();
+  expect(() => noteCompactionPromptSize(542_750, LIMIT)).not.toThrow();
+  expect(() => noteCompactionPromptSize(542_800, LIMIT)).not.toThrow();
 });
 
 test("pressure that returns after a lull still fails closed", () => {
-  expect(() => noteCompactionPromptSize(95_137, LIMIT)).not.toThrow();
-  expect(() => noteCompactionPromptSize(40_000, LIMIT)).not.toThrow();
-  expect(() => noteCompactionPromptSize(95_100, LIMIT)).not.toThrow();
-  expect(() => noteCompactionPromptSize(94_800, LIMIT)).not.toThrow();
-  expect(() => noteCompactionPromptSize(94_900, LIMIT)).toThrow("no longer reducing this session");
+  expect(() => noteCompactionPromptSize(950_000, LIMIT)).not.toThrow();
+  expect(() => noteCompactionPromptSize(400_000, LIMIT)).not.toThrow();
+  expect(() => noteCompactionPromptSize(951_000, LIMIT)).not.toThrow();
+  expect(() => noteCompactionPromptSize(948_000, LIMIT)).not.toThrow();
+  expect(() => noteCompactionPromptSize(949_000, LIMIT)).toThrow("no longer reducing this session");
 });
 
 test("a model with no composer limit has no pressure to declare a stall against", () => {

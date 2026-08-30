@@ -167,8 +167,8 @@ describe("native /models augmentation", () => {
       autoCompactTokenLimit: model.auto_compact_token_limit,
     }))).toEqual([
       { contextWindow: 41_000, effectiveContextWindowPercent: 78, autoCompactTokenLimit: 32_000 },
-      { contextWindow: 90_000, effectiveContextWindowPercent: 67, autoCompactTokenLimit: 60_000 },
-      { contextWindow: 90_000, effectiveContextWindowPercent: 67, autoCompactTokenLimit: 60_000 },
+      { contextWindow: 90_000, effectiveContextWindowPercent: 89, autoCompactTokenLimit: 80_000 },
+      { contextWindow: 90_000, effectiveContextWindowPercent: 89, autoCompactTokenLimit: 80_000 },
     ]);
   });
 

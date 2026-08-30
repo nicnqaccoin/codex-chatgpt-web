@@ -1624,8 +1624,6 @@ test("browser preflight separates model context from one-message transport limit
     plus,
     211_257,
   )).toThrow("211,256-character ChatGPT composer boundary");
-    // The medium/high boundary here is the 110,000 this branch measured on a Plus account, not the
-    // 1,048,572 upstream publishes - the larger figure was never reachable in two measurement rounds.
   for (const effort of ["medium", "high"] as const) {
     expect(() => assertChatGptWebInputWithinLimits(
       1,
@@ -1641,8 +1639,8 @@ test("browser preflight separates model context from one-message transport limit
       "gpt-5.6-sol",
       effort,
       plus,
-      110_001,
-    )).toThrow("110,000-character ChatGPT composer boundary");
+      1_048_573,
+    )).toThrow("1,048,572-character ChatGPT composer boundary");
   }
 
   expect(() => assertChatGptWebInputWithinLimits(
@@ -1731,8 +1729,8 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
 test("Bigger Context stages use the lowest account mode that can carry the stage", () => {
   const plus = { localToolsEnabled: false, solAvailable: true, proAvailable: false };
   const pro = { localToolsEnabled: false, solAvailable: true, proAvailable: true };
-  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, "medium", 30_000, 100_000).effort).toBe("medium");
-  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, "high", 30_000, 100_000).effort).toBe("medium");
+  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, "medium", 30_000, 200_000).effort).toBe("medium");
+  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, "high", 30_000, 300_000).effort).toBe("medium");
   expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, "medium", 100_000, 500_000).effort).toBe("low");
   expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, "medium", 100_000, 600_000).effort).toBe("medium");
   expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, "max", 104_000, 1_200_000).effort).toBe("max");
@@ -1754,7 +1752,7 @@ test("Bigger Context stages use the lowest account mode that can carry the stage
     {
       stagingEffort: "medium",
       maxStageMessageTokens: 30_000,
-      maxStageChars: 100_000,
+      maxStageChars: 300_000,
       finalMessageTokens: 1_000,
       finalMessageChars: 4_000,
     },

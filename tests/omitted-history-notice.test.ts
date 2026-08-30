@@ -33,7 +33,7 @@ test("no notice when the whole history fits", () => {
 });
 
 test("a trimmed turn tells the model its view is partial", () => {
-  const filler = "conversation ".repeat(20_000);
+  const filler = "conversation ".repeat(200_000);
   const compiled = compileChatGptWebPrompt(
     request([
       { role: "user", content: APP_CONTEXT, timestamp: 1 },
