@@ -1145,6 +1145,7 @@ class ChatGptBrowserDiagnostics {
           effortControlSelector,
           effortItemSelector,
           assistantTurnSelector,
+          userTurnSelector,
         }) => {
           const rendered = (element: Element): boolean => {
             const candidate = element as HTMLElement;
@@ -1161,11 +1162,15 @@ class ChatGptBrowserDiagnostics {
               .trim()
               .slice(0, 1_000)
           );
-          const rows = (selector: string, limit = 40) => [...document.querySelectorAll(selector)]
+          // getBoundingClientRect forces layout per element. Across the high-count groups - forty
+          // connector rows, thirty overlays - that was most of the ~50ms every checkpoint cost, and
+          // seventeen checkpoints run before a message is even sent. Geometry is only read back for
+          // the controls a hidden viewport can misplace, so only those groups still pay for it.
+          const rows = (selector: string, limit = 40, geometry = false) => [...document.querySelectorAll(selector)]
             .filter(rendered)
             .slice(-limit)
             .map(element => {
-              const rect = element.getBoundingClientRect();
+              const rect = geometry ? element.getBoundingClientRect() : undefined;
               return {
                 tag: element.tagName.toLowerCase(),
                 role: element.getAttribute("role"),
@@ -1174,7 +1179,7 @@ class ChatGptBrowserDiagnostics {
                 ariaChecked: element.getAttribute("aria-checked"),
                 dataState: element.getAttribute("data-state"),
                 dataHighlighted: element.getAttribute("data-highlighted"),
-                rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+                ...(rect ? { rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } } : {}),
                 text: boundedText(element),
               };
             });
@@ -1193,13 +1198,15 @@ class ChatGptBrowserDiagnostics {
               textChars: composers.map(element => (element.textContent ?? "").length),
               selectedConnectors: rows('[data-id^="plugin:"][data-keyword]', 20),
             },
-            effortControls: rows(effortControlSelector, 10),
-            effortItems: rows(effortItemSelector, 20),
-            menus: rows('[role="menu"], [role="listbox"], [data-testid="composer-intelligence-picker-content"]', 20),
+            effortControls: rows(effortControlSelector, 10, true),
+            effortItems: rows(effortItemSelector, 20, true),
+            menus: rows('[role="menu"], [role="listbox"], [data-testid="composer-intelligence-picker-content"]', 20, true),
             connectorRows: rows('.__menu-item[tabindex="0"]', 40),
             overlays: rows('[role="dialog"], [role="alert"], [role="status"]', 30),
             turns: {
-              user: document.querySelectorAll('[data-testid^="conversation-turn-"][data-message-author-role="user"]').length,
+              // This counted one of the three shapes the production selector accepts, so every capture
+              // reported zero user turns even on a message ChatGPT had demonstrably accepted.
+              user: document.querySelectorAll(userTurnSelector).length,
               assistant: assistantTurns.map(element => ({
                 textChars: (element.textContent ?? "").length,
                 htmlChars: (element as HTMLElement).innerHTML.length,
@@ -1211,6 +1218,7 @@ class ChatGptBrowserDiagnostics {
           effortControlSelector: CHATGPT_EFFORT_CONTROL_SELECTOR,
           effortItemSelector: CHATGPT_EFFORT_ITEM_SELECTOR,
           assistantTurnSelector: CHATGPT_ASSISTANT_TURN_SELECTOR,
+          userTurnSelector: CHATGPT_USER_TURN_SELECTOR,
         })),
       ]);
       const capturedAt = new Date().toISOString();
@@ -2309,10 +2317,6 @@ export class ChatGptBrowserWorker {
     const appResult = menuRows.filter({
       has: page.getByText(this.config.appName, { exact: true }),
     });
-    // Proving connector access opens the very menu the selection below needs. Clearing the composer
-    // here threw that away and made the next block type the mention a second time - measured at 1.38s
-    // of the setup, paid on almost every turn. Leave the resolved menu standing and select from it.
-    let mentionResolved = false;
     await ensureChatGptPersonalizedConnectorAccess(
       page,
       captureDiagnostic,
@@ -2324,33 +2328,24 @@ export class ChatGptBrowserWorker {
         await composer.pressSequentially(CHATGPT_CONNECTOR_MENTION_QUERY, { delay: 25 });
         try {
           await appResult.waitFor({ state: "visible", timeout: 2_500 });
-          mentionResolved = true;
           return true;
         } catch (error) {
           if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
-          await composer.fill("").catch(() => {});
           return false;
+        } finally {
+          await composer.fill("").catch(() => {});
         }
       },
     );
     composer = await this.activeComposer(page);
-    // A menu that closed again between the probe and here is not a menu, so fall back to the loop.
-    if (mentionResolved && !await appResult.isVisible().catch(() => false)) {
-      mentionResolved = false;
-      await composer.fill("").catch(() => {});
-    }
-    if (!mentionResolved) {
-      await composer.fill("");
-      if (await this.connectorIsSelected(composer)) {
-        await captureDiagnostic?.("connector-already-selected");
-        return composer;
-      }
-    } else {
-      await captureDiagnostic?.("connector-menu-visible");
+    await composer.fill("");
+    if (await this.connectorIsSelected(composer)) {
+      await captureDiagnostic?.("connector-already-selected");
+      return composer;
     }
 
     let firstMenuCaptured = false;
-    while (!mentionResolved && attemptBudget.triggerAttempts < MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS) {
+    while (attemptBudget.triggerAttempts < MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS) {
       attemptBudget.triggerAttempts += 1;
       composer = await this.activeComposer(page);
       await composer.fill("");
