@@ -2544,8 +2544,9 @@ export class ChatGptBrowserWorker {
       initialToolBatchRevision,
     );
     submissionLifecycle?.onSubmitted?.();
-    // Everything from here to `send-accepted` is ChatGPT deciding to answer, not us sending. Without
-    // this mark the two are one 16s bar and there is no way to tell which half to work on.
+    // Everything from here to `assistant-turn-visible` is ChatGPT deciding to answer, not us sending.
+    // Without this mark the two were one 16s bar with no way to tell which half to work on; the split
+    // put 0.86s on this side and 10.29s on the other.
     await captureDiagnostic?.("submission-accepted");
     return evidence;
   }
@@ -3636,10 +3637,11 @@ export class ChatGptBrowserWorker {
         turn.externalProgress,
       );
       console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${finalSubmissionEvidence}`);
-      // These two counters were already being incremented on every submission poll and then thrown
-      // away; the only place that logged a DOM cache reported the response loop's, not this one.
-      // They separate "the wait was long because the renderer was busy" from "ChatGPT was slow".
-      await diagnostics.capture(page, "send-accepted", undefined, {
+      // Named for what it actually observes. As `send-accepted` this checkpoint sat after
+      // waitForNewAssistantTurn and so charged ChatGPT's thinking time to our send path: the first
+      // split turn measured 0.86s to deliver the prompt and 10.29s waiting for the answer to appear,
+      // over only 4 DOM scans - a renderer doing nothing, not a poll loop to tune.
+      await diagnostics.capture(page, "assistant-turn-visible", undefined, {
         submissionEvidence: finalSubmissionEvidence,
         baselineDomCache: {
           fullScans: submissionBaseline.domCache.fullScans ?? 0,
