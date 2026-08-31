@@ -504,6 +504,7 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
   const initialComposer = {
     fill: async (value: string) => { calls.push(["fill", value]); },
     focus: async () => { calls.push(["focus"]); },
+    evaluate: async () => { calls.push(["typingReady"]); return true; },
     pressSequentially: async (value: string, options: { delay: number }) => {
       expect(options).toEqual({ delay: 25 });
       calls.push(["pressSequentially", value]);
@@ -553,16 +554,20 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
 
   expect(resolved).toBe(selectedComposer);
   expect(activeComposerCalls).toBe(3);
+  // One clear, not two: the loop used to re-clear a composer the line above had just emptied. The
+  // readiness probe replaces a flat 250ms sleep and has to sit between focus and the first keystroke,
+  // because that is the gap Lexical needs to accept typed input.
   expect(calls).toEqual([
     ["fill", ""],
-    ["fill", ""],
     ["focus"],
+    ["typingReady"],
     ["pressSequentially", "@codex"],
     ["waitForResult"],
     ["press"],
     ["waitForSelectedConnector"],
   ]);
 });
+
 
 test("connector selection moves highlight to the exact hidden-viewport row before Enter", async () => {
   const keys: string[] = [];
@@ -580,7 +585,12 @@ test("connector selection moves highlight to the exact hidden-viewport row befor
       ? { count: async () => 3 }
       : appResult,
   };
-  const initialComposer = { fill: async () => {}, focus: async () => {}, pressSequentially: async () => {} };
+  const initialComposer = {
+    fill: async () => {},
+    focus: async () => {},
+    evaluate: async () => true,
+    pressSequentially: async () => {},
+  };
   const selectedComposer = { selected: true };
   const page = {
     getByRole: personalizedTemporaryChatRole,
@@ -635,6 +645,7 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
   const initialComposer = {
     fill: async () => { calls.push("clear"); },
     focus: async () => { calls.push("focus"); },
+    evaluate: async () => true,
     pressSequentially: async (value: string) => {
       expect(value).toBe("@codex");
       calls.push("type");
@@ -670,9 +681,12 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
     },
   }, page);
 
+  // The first attempt types into the composer the line above already emptied, so it does not clear
+  // again. The second attempt has to: it is looking at the `@codex` the timed-out attempt left, and
+  // typing a second mention into that never opens the menu.
   expect(calls).toEqual([
     "clear",
-    "clear", "focus", "type", "menu:1",
+    "focus", "type", "menu:1",
     "clear", "focus", "type", "menu:2",
     "activate", "selected",
   ]);
@@ -709,6 +723,7 @@ test("connector verification preserves the host-refreshed catalog evidence", asy
   const initialComposer = {
     fill: async () => { calls.push("clear"); },
     focus: async () => { calls.push("focus"); },
+    evaluate: async () => true,
     pressSequentially: async () => { calls.push("type"); },
   };
   const selectedComposer = { selected: true };
@@ -804,6 +819,7 @@ test("connector catalog refresh stays fail-closed for absent, legacy, and exact 
         activeComposer: async () => ({
           fill: async () => {},
           focus: async () => {},
+          evaluate: async () => true,
           pressSequentially: async () => {},
         }),
         connectorIsSelected: async () => false,
@@ -863,6 +879,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   const initialComposer = {
     fill: async (value: string) => { calls.push(["fill", value]); },
     focus: async () => { calls.push(["focus"]); },
+    evaluate: async () => true,
     pressSequentially: async (value: string) => { calls.push(["type", value]); },
   };
   const page = {
@@ -908,7 +925,6 @@ test("tool-capable prompts use the shared Playwright connector selection before 
   }, page, "context", true);
 
   expect(calls).toEqual([
-    ["fill", ""],
     ["fill", ""],
     ["focus"],
     ["type", "@codex"],

@@ -146,6 +146,31 @@ const settleChatGptUi = (): Promise<void> => (
   new Promise(resolveSettle => setTimeout(resolveSettle, CHATGPT_UI_SETTLE_MS))
 );
 
+/**
+ * `focus()` resolves when the element takes focus, but Lexical only accepts typed input once its
+ * selection sits inside the editor, a frame or two later. A flat 250ms sleep was standing in for that
+ * gap; this waits for the condition itself - the same predicate `insertPromptText` asserts before
+ * running its editing command - and usually returns on the first poll.
+ *
+ * A timeout types anyway rather than throwing: the caller's 2.5s menu wait is the real verdict and it
+ * retries. Being wrong here costs one slow attempt, never a wrongly submitted turn.
+ */
+async function waitForComposerTypingReady(composer: Locator, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const ready = await composer.evaluate(element => {
+      const selection = window.getSelection();
+      return document.activeElement === element
+        && !!selection
+        && selection.isCollapsed
+        && !!selection.anchorNode
+        && element.contains(selection.anchorNode);
+    }).catch(() => false);
+    if (ready || Date.now() >= deadline) return;
+    await new Promise(resolveSleep => setTimeout(resolveSleep, 25));
+  }
+}
+
 class ChatGptConnectorCatalogStaleError extends Error {
   constructor(
     readonly appName: string,
@@ -1081,7 +1106,14 @@ export function redactChatGptUiDiagnostic(value: string): string {
     .replace(/\b(turn|binding|call)_[A-Za-z0-9_-]{12,}\b/g, "$1_[redacted]");
 }
 
-const CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT = 10;
+/**
+ * Ten turns is less than one long task, so a regression that arrives with the next task has already
+ * erased the baseline it should be compared against - which is what happened to the 6.39s
+ * `send-accepted` reading. Sixty holds a fifty-turn extraction whole, including the opening turns
+ * where a compaction loop would start. Screenshots are already restricted to failing checkpoints
+ * below, so a retained turn is JSON only at roughly 380KB, putting the ceiling near 23MB.
+ */
+const CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT = 60;
 
 export function browserDiagnosticCheckpoint(value: string): string {
   const safe = value.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
@@ -1125,7 +1157,17 @@ class ChatGptBrowserDiagnostics {
     this.directory = join(this.root, `${traceId}-${randomUUID().slice(0, 8)}`);
   }
 
-  async capture(page: Page, checkpoint: string, error?: unknown): Promise<void> {
+  /**
+   * `notes` carries the numbers only the caller holds - which submission evidence matched, how many
+   * DOM scans a wait cost - into the same file as the page state, so a slow checkpoint can be
+   * attributed without a second instrument.
+   */
+  async capture(
+    page: Page,
+    checkpoint: string,
+    error?: unknown,
+    notes?: Record<string, unknown>,
+  ): Promise<void> {
     try {
       if (!this.initialized) {
         privateDirectory(this.root);
@@ -1247,6 +1289,7 @@ class ChatGptBrowserDiagnostics {
         ...(error !== undefined ? {
           error: redactChatGptUiDiagnostic(error instanceof Error ? error.message : String(error)),
         } : {}),
+        ...(notes !== undefined ? { notes } : {}),
         ...(stateResult.status === "fulfilled" ? { state: stateResult.value } : {}),
         ...(Object.keys(captureErrors).length > 0 ? { captureErrors } : {}),
       }, null, 2)}\n`);
@@ -2345,12 +2388,16 @@ export class ChatGptBrowserWorker {
     }
 
     let firstMenuCaptured = false;
+    // The composer was cleared just above, so the first pass through this loop was clearing an empty
+    // editor. Later passes are clearing the `@codex` the failed attempt left behind, and still need it.
+    let composerDirty = false;
     while (attemptBudget.triggerAttempts < MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS) {
       attemptBudget.triggerAttempts += 1;
       composer = await this.activeComposer(page);
-      await composer.fill("");
+      if (composerDirty) await composer.fill("");
       await composer.focus();
-      await settleChatGptUi();
+      await waitForComposerTypingReady(composer);
+      composerDirty = true;
       await composer.pressSequentially(CHATGPT_CONNECTOR_MENTION_QUERY, { delay: 25 });
       if (!firstMenuCaptured) {
         firstMenuCaptured = true;
@@ -2497,6 +2544,9 @@ export class ChatGptBrowserWorker {
       initialToolBatchRevision,
     );
     submissionLifecycle?.onSubmitted?.();
+    // Everything from here to `send-accepted` is ChatGPT deciding to answer, not us sending. Without
+    // this mark the two are one 16s bar and there is no way to tell which half to work on.
+    await captureDiagnostic?.("submission-accepted");
     return evidence;
   }
 
@@ -3586,7 +3636,16 @@ export class ChatGptBrowserWorker {
         turn.externalProgress,
       );
       console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${finalSubmissionEvidence}`);
-      await diagnostics.capture(page, "send-accepted");
+      // These two counters were already being incremented on every submission poll and then thrown
+      // away; the only place that logged a DOM cache reported the response loop's, not this one.
+      // They separate "the wait was long because the renderer was busy" from "ChatGPT was slow".
+      await diagnostics.capture(page, "send-accepted", undefined, {
+        submissionEvidence: finalSubmissionEvidence,
+        baselineDomCache: {
+          fullScans: submissionBaseline.domCache.fullScans ?? 0,
+          cacheHits: submissionBaseline.domCache.cacheHits ?? 0,
+        },
+      });
 
       let lastHeartbeat = 0;
       // Nothing bounds a turn that stops producing: only the user can end it, and one sat for ten
