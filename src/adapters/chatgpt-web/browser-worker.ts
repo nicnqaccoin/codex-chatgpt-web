@@ -2309,6 +2309,10 @@ export class ChatGptBrowserWorker {
     const appResult = menuRows.filter({
       has: page.getByText(this.config.appName, { exact: true }),
     });
+    // Proving connector access opens the very menu the selection below needs. Clearing the composer
+    // here threw that away and made the next block type the mention a second time - measured at 1.38s
+    // of the setup, paid on almost every turn. Leave the resolved menu standing and select from it.
+    let mentionResolved = false;
     await ensureChatGptPersonalizedConnectorAccess(
       page,
       captureDiagnostic,
@@ -2320,24 +2324,33 @@ export class ChatGptBrowserWorker {
         await composer.pressSequentially(CHATGPT_CONNECTOR_MENTION_QUERY, { delay: 25 });
         try {
           await appResult.waitFor({ state: "visible", timeout: 2_500 });
+          mentionResolved = true;
           return true;
         } catch (error) {
           if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
-          return false;
-        } finally {
           await composer.fill("").catch(() => {});
+          return false;
         }
       },
     );
     composer = await this.activeComposer(page);
-    await composer.fill("");
-    if (await this.connectorIsSelected(composer)) {
-      await captureDiagnostic?.("connector-already-selected");
-      return composer;
+    // A menu that closed again between the probe and here is not a menu, so fall back to the loop.
+    if (mentionResolved && !await appResult.isVisible().catch(() => false)) {
+      mentionResolved = false;
+      await composer.fill("").catch(() => {});
+    }
+    if (!mentionResolved) {
+      await composer.fill("");
+      if (await this.connectorIsSelected(composer)) {
+        await captureDiagnostic?.("connector-already-selected");
+        return composer;
+      }
+    } else {
+      await captureDiagnostic?.("connector-menu-visible");
     }
 
     let firstMenuCaptured = false;
-    while (attemptBudget.triggerAttempts < MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS) {
+    while (!mentionResolved && attemptBudget.triggerAttempts < MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS) {
       attemptBudget.triggerAttempts += 1;
       composer = await this.activeComposer(page);
       await composer.fill("");
@@ -3592,7 +3605,6 @@ export class ChatGptBrowserWorker {
       let sawRunning = false;
       let loggedCompletionWait = false;
       let capturedResponse = false;
-      const sentAt = Date.now();
       const visibleTrace = new ChatGptVisibleTraceTracker();
       const markdownBuffer = new ChatGptMarkdownBuffer();
       const checkpointStream = turn.captureLunaCheckpoint
@@ -3780,7 +3792,10 @@ export class ChatGptBrowserWorker {
             }
             break;
           }
-          if (!loggedCompletionWait && Date.now() - sentAt >= 30_000) {
+          // This measures how long the turn has been quiet, not how long it has been running. Keyed
+          // on total elapsed it fired on nine of ten turns - a DOM probe and a screenshot on almost
+          // every one - while a turn that genuinely stalled looked no different from one still writing.
+          if (!loggedCompletionWait && Date.now() - lastActivityAt >= 30_000) {
             loggedCompletionWait = true;
             await diagnostics.capture(page, "response-stalled-30s");
             const diagnostic = await this.stalledTurnDiagnostic(page, responseTurn.locator).catch(error => JSON.stringify({
