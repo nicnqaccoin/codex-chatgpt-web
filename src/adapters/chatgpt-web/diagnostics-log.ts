@@ -1,6 +1,8 @@
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { homedir } from "os";
+import { VERSION } from "../../version";
+import { runtimeBuildId } from "../../runtime-manifest";
 
 export const MAX_RECORDS_PER_FILE = 500;
 
@@ -41,7 +43,15 @@ export function appendDiagnosticRecord(fileName: string, record: Record<string, 
   try {
     const target = diagnosticsPath(fileName);
     mkdirSync(dirname(target), { recursive: true });
-    appendBoundedRecord(target, JSON.stringify({ at: new Date().toISOString(), ...record }));
+    // Stamp the build into every failure/trim record. The browser checkpoints already carry it, but
+    // turn-failures.jsonl and context-trim.jsonl did not, so a failure could not be attributed to a
+    // bundle - which is exactly why a same-semver hotfix could not be told apart when a turn broke.
+    appendBoundedRecord(target, JSON.stringify({
+      at: new Date().toISOString(),
+      runtimeVersion: VERSION,
+      buildId: runtimeBuildId(),
+      ...record,
+    }));
   } catch {
     // A diagnostics failure is never worth failing a turn over.
   }
