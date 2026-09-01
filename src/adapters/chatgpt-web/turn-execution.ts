@@ -562,7 +562,7 @@ export class ChatGptTurnSessions {
     this.conversationHeads.delete(conversationKey);
     for (const [key, session] of matches) {
       if (this.entries.get(key) === session) this.entries.delete(key);
-      if (session.isActive()) session.cancel();
+      if (session.isActive()) session.cancel(new Error("retired: retained conversation replaced"));
     }
     const release = matches.findLast(([, session]) => (
       session.runtime.releaseRetainedConversation !== undefined
@@ -584,7 +584,7 @@ export class ChatGptTurnSessions {
     await this.retirements.get(key);
   }
 
-  async retireAndWait(key: string, signal?: AbortSignal): Promise<boolean> {
+  async retireAndWait(key: string, signal?: AbortSignal, reason?: Error): Promise<boolean> {
     const pending = this.retirements.get(key);
     if (pending) {
       await awaitWithAbort(pending, signal);
@@ -595,15 +595,16 @@ export class ChatGptTurnSessions {
 
     this.entries.delete(key);
     this.forgetConversationHead(session);
-    await awaitWithAbort(this.beginRetirement(key, session), signal);
+    await awaitWithAbort(this.beginRetirement(key, session, reason), signal);
     return true;
   }
 
-  retire(key: string, session: ChatGptTurnSession): boolean {
+  retire(key: string, session: ChatGptTurnSession, reason?: Error): boolean {
     if (this.entries.get(key) !== session) return false;
     this.entries.delete(key);
     this.forgetConversationHead(session);
-    this.beginRetirement(key, session);    return true;
+    this.beginRetirement(key, session, reason);
+    return true;
   }
 
   clear(): number {
@@ -643,7 +644,7 @@ export class ChatGptTurnSessions {
     const cutoff = Date.now() - this.ttlMs;
     for (const [key, session] of this.entries) {
       if (session.isActive() || session.lastUsedAt() >= cutoff) continue;
-      session.cancel();
+      session.cancel(new Error("pruned: session idle beyond registry TTL"));
       this.entries.delete(key);
       this.forgetConversationHead(session);
     }
@@ -656,10 +657,12 @@ export class ChatGptTurnSessions {
     }
   }
 
-  private beginRetirement(key: string, session: ChatGptTurnSession): Promise<void> {
+  private beginRetirement(key: string, session: ChatGptTurnSession, reason?: Error): Promise<void> {
     const existing = this.retirements.get(key);
     if (existing) return existing;
-    session.cancel();
+    // Carry a reason into the abort so a turn that dies mid-flight can name what retired it, instead
+    // of every cancellation surfacing as an indistinguishable "ChatGPT web turn aborted".
+    session.cancel(reason ?? new Error("retired"));
     const retirement = session.physicalSettlement;
     this.retirements.set(key, retirement);
     void retirement.then(() => {

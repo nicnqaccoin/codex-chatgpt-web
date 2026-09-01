@@ -4013,7 +4013,12 @@ export class ChatGptBrowserWorker {
         if (turn.abortSignal?.aborted) {
           const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
           if (await stop.isVisible().catch(() => false)) await stop.press("Enter").catch(() => {});
-          throw new DOMException("ChatGPT web turn aborted", "AbortError");
+          // Name what aborted this turn. The signal reason is set by whatever cancelled the session
+          // (retire, prune, compaction handoff); surfacing it turns an anonymous abort mid-response
+          // into a diagnosable cause in turn-failures.jsonl.
+          const reason = (turn.abortSignal as AbortSignal & { reason?: unknown }).reason;
+          const detail = reason instanceof Error && reason.message ? `: ${reason.message}` : "";
+          throw new DOMException(`ChatGPT web turn aborted${detail}`, "AbortError");
         }
         if (deadline !== undefined && Date.now() >= deadline) {
           throw new Error("ChatGPT web turn timed out");

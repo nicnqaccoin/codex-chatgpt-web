@@ -710,7 +710,11 @@ export function createChatGptWebAdapter(
             return;
           }
           const responseExecutionKey = `${executionNamespace}:${chatGptCompactionSourceExecutionKey(parsed)}`;
-          await chatGptTurnSessions.retireAndWait(responseExecutionKey, incoming.abortSignal);
+          await chatGptTurnSessions.retireAndWait(
+            responseExecutionKey,
+            incoming.abortSignal,
+            new Error("retired: a compaction request superseded the running response turn on this thread"),
+          );
         }
         const executionKey = `${executionNamespace}:${chatGptTurnExecutionKey(parsed)}`;
         const ownerKey = `${executionNamespace}:${chatGptThreadOwnershipKey(parsed)}`;
@@ -971,7 +975,11 @@ export function createChatGptWebAdapter(
             // instead of replaying one rejected browser outcome for the registry's full TTL.
             session.cancel();
           } else {
-            chatGptTurnSessions.retire(executionKey, session);
+            chatGptTurnSessions.retire(
+              executionKey,
+              session,
+              new Error(`retired: turn failed (${(turnError instanceof Error ? turnError.message : String(turnError)).slice(0, 80)})`),
+            );
           }
           if (session.runtime.mode === "tools") {
             void session.runtime.token.then(turnToken => broker.revoke(turnToken)).catch(() => {});
