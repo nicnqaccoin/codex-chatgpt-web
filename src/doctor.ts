@@ -3,6 +3,9 @@ import type { AppConfig } from "./config";
 import { getConfigDir, getConfigPath, loadConfig } from "./config";
 import { join } from "node:path";
 import { inspectCodexIntegration } from "./codex-integration";
+import { findTopLevelAssignment, splitLines } from "./codex-integration-document";
+import { getCodexConfigPath } from "./codex-integration-shared";
+import { availableChatGptWebModelRoutes, resolveChatGptWebContextLimits } from "./chatgpt-web-models";
 import { browserLoginStateExists, loginVerificationMarkerPath } from "./browser-login";
 import { getServiceStatus } from "./service";
 import { tunnelStatus } from "./tunnel";
@@ -93,6 +96,87 @@ async function proxyCheck(config: AppConfig): Promise<DoctorCheck> {
   }
 }
 
+/**
+ * `model_catalog_json` points Codex at a static file whose limits are read verbatim in place of the
+ * ones this bridge computes on the fly. When that file was written under older settings it silently
+ * caps the context window low, and Codex compacts far sooner than it needs to - one image-heavy task
+ * compacted twelve times and ran three times as long before the file was corrected. Every other check
+ * here passed throughout, because nothing looked at the catalog. This one does: it recomputes the
+ * limits the bridge would serve now and flags any chatgpt-web row the static file undercuts.
+ *
+ * Only a static value BELOW the computed one is a fault - that is the direction that forces early
+ * compaction. A higher static value would over-report headroom, which Codex's own usage accounting
+ * already bounds, so it is left as information rather than a warning.
+ */
+export function catalogDriftCheck(config: AppConfig): DoctorCheck {
+  let catalogPath: string | undefined;
+  try {
+    const lines = splitLines(readFileSync(getCodexConfigPath(), "utf8"));
+    const assignment = findTopLevelAssignment(lines, "model_catalog_json");
+    catalogPath = assignment.present ? assignment.value : undefined;
+  } catch (error) {
+    return {
+      id: "model-catalog",
+      status: "warning",
+      message: "Could not read the Codex config to check the model catalog",
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  if (!catalogPath) {
+    return { id: "model-catalog", status: "ok", message: "Codex reads this bridge's live model catalog" };
+  }
+  if (!existsSync(catalogPath)) {
+    return { id: "model-catalog", status: "warning", message: `Configured model_catalog_json is missing: ${catalogPath}` };
+  }
+
+  let staged: Map<string, { context: number; autoCompact: number }>;
+  try {
+    const parsed = JSON.parse(readFileSync(catalogPath, "utf8")) as { models?: unknown };
+    const models = Array.isArray(parsed.models) ? parsed.models : [];
+    staged = new Map();
+    for (const model of models) {
+      if (!model || typeof model !== "object") continue;
+      const row = model as Record<string, unknown>;
+      if (typeof row.slug !== "string") continue;
+      staged.set(row.slug, {
+        context: typeof row.context_window === "number" ? row.context_window : 0,
+        autoCompact: typeof row.auto_compact_token_limit === "number" ? row.auto_compact_token_limit : 0,
+      });
+    }
+  } catch (error) {
+    return {
+      id: "model-catalog",
+      status: "warning",
+      message: `Static model catalog is unreadable: ${catalogPath}`,
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  const drifts: string[] = [];
+  for (const route of availableChatGptWebModelRoutes(config)) {
+    const entry = staged.get(route.slug);
+    if (!entry) continue;
+    const expected = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config);
+    if (entry.context < expected.contextWindow || entry.autoCompact < expected.autoCompactTokenLimit) {
+      drifts.push(
+        `${route.slug}: static ${entry.context}/${entry.autoCompact}`
+        + ` vs computed ${expected.contextWindow}/${expected.autoCompactTokenLimit}`,
+      );
+    }
+  }
+
+  if (drifts.length === 0) {
+    return { id: "model-catalog", status: "ok", message: "Static model catalog matches the bridge's current limits" };
+  }
+  return {
+    id: "model-catalog",
+    status: "warning",
+    message: "Static model catalog undercuts this bridge's limits; Codex will compact early. Rerun setup to regenerate it.",
+    detail: drifts.join("; "),
+  };
+}
+
 export async function runDoctor(): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [];
   let config: AppConfig;
@@ -165,6 +249,7 @@ export async function runDoctor(): Promise<DoctorReport> {
     checks.push({ id: "service", status: "ok", message: "macOS background service is loaded" });
   }
   checks.push(await proxyCheck(config));
+  checks.push(catalogDriftCheck(config));
 
   if (config.mode === "full") {
     const settings = config.tunnel!;
