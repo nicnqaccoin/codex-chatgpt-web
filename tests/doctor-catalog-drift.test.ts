@@ -66,6 +66,28 @@ test("a catalog carrying the corrected limits raises no drift", () => {
   expect(catalogDriftCheck(config).status).toBe("ok");
 });
 
+// The failure this direction causes is worse than compacting early: Codex believes it has headroom
+// it does not have, so auto-compaction never fires and the turn is rejected outright with
+// context_length_exceeded. This is the exact state produced by switching Bigger Context off while
+// the catalog still carries the tripled numbers - observed live at 92,448 tokens against a real
+// 90,000 ceiling.
+test("a catalog promising more context than the bridge serves is flagged as the dangerous direction", () => {
+  const catalog = writeCatalog("over.json", [
+    { slug: "chatgpt-web/high", ctx: 270_000, auto: 240_000 },
+    { slug: "chatgpt-web/medium", ctx: 270_000, auto: 240_000 },
+  ]);
+  writeCodexConfig(`model_catalog_json = ${JSON.stringify(catalog)}\n`);
+
+  // Bigger Context OFF: the bridge computes 90,000/80,000 for medium and high.
+  const withoutBiggerContext = { ...config, experimentalBiggerContext: false } as unknown as AppConfig;
+  const check = catalogDriftCheck(withoutBiggerContext);
+  expect(check.status).toBe("warning");
+  expect(check.message).toContain("context_length_exceeded");
+  expect(check.message).toContain("Bigger Context");
+  expect(check.detail).toContain("over-reports headroom");
+  expect(check.detail).toContain("270000/240000");
+});
+
 test("no model_catalog_json means Codex reads the live bridge catalog", () => {
   writeCodexConfig(`model_provider = "codex-chatgpt-web"\n`);
   const check = catalogDriftCheck(config);

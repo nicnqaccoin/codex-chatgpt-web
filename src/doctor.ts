@@ -102,11 +102,16 @@ async function proxyCheck(config: AppConfig): Promise<DoctorCheck> {
  * caps the context window low, and Codex compacts far sooner than it needs to - one image-heavy task
  * compacted twelve times and ran three times as long before the file was corrected. Every other check
  * here passed throughout, because nothing looked at the catalog. This one does: it recomputes the
- * limits the bridge would serve now and flags any chatgpt-web row the static file undercuts.
+ * limits the bridge would serve now and flags any chatgpt-web row that disagrees with them.
  *
- * Only a static value BELOW the computed one is a fault - that is the direction that forces early
- * compaction. A higher static value would over-report headroom, which Codex's own usage accounting
- * already bounds, so it is left as information rather than a warning.
+ * BOTH directions are faults, for opposite reasons:
+ *  - static BELOW computed makes Codex compact far sooner than needed. One image-heavy task compacted
+ *    twelve times and ran three times as long before the file was corrected.
+ *  - static ABOVE computed is worse: Codex believes it has headroom it does not have, so auto
+ *    compaction never fires, and the turn is hard-rejected with context_length_exceeded. That is
+ *    exactly what happens when Bigger Context is switched off while the catalog still carries the
+ *    tripled numbers - the bridge drops to 90,000 while the file still promises 270,000, and the
+ *    conversation dies at the limit instead of compacting through it.
  */
 export function catalogDriftCheck(config: AppConfig): DoctorCheck {
   let catalogPath: string | undefined;
@@ -154,16 +159,20 @@ export function catalogDriftCheck(config: AppConfig): DoctorCheck {
   }
 
   const drifts: string[] = [];
+  let overReports = false;
   for (const route of availableChatGptWebModelRoutes(config)) {
     const entry = staged.get(route.slug);
     if (!entry) continue;
     const expected = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config);
-    if (entry.context < expected.contextWindow || entry.autoCompact < expected.autoCompactTokenLimit) {
-      drifts.push(
-        `${route.slug}: static ${entry.context}/${entry.autoCompact}`
-        + ` vs computed ${expected.contextWindow}/${expected.autoCompactTokenLimit}`,
-      );
-    }
+    const under = entry.context < expected.contextWindow || entry.autoCompact < expected.autoCompactTokenLimit;
+    const over = entry.context > expected.contextWindow || entry.autoCompact > expected.autoCompactTokenLimit;
+    if (!under && !over) continue;
+    if (over) overReports = true;
+    drifts.push(
+      `${route.slug}: static ${entry.context}/${entry.autoCompact}`
+      + ` vs computed ${expected.contextWindow}/${expected.autoCompactTokenLimit}`
+      + ` (${over ? "over-reports headroom" : "undercuts"})`,
+    );
   }
 
   if (drifts.length === 0) {
@@ -172,7 +181,13 @@ export function catalogDriftCheck(config: AppConfig): DoctorCheck {
   return {
     id: "model-catalog",
     status: "warning",
-    message: "Static model catalog undercuts this bridge's limits; Codex will compact early. Rerun setup to regenerate it.",
+    message: overReports
+      // The dangerous direction: auto compaction never fires and the turn is rejected outright.
+      ? "Static model catalog promises more context than this bridge serves;"
+        + " auto-compaction will not fire and turns will fail with context_length_exceeded."
+        + " Re-enable Bigger Context or rerun setup to regenerate the catalog."
+      : "Static model catalog undercuts this bridge's limits; Codex will compact early."
+        + " Rerun setup to regenerate it.",
     detail: drifts.join("; "),
   };
 }
