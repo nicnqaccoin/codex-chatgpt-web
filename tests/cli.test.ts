@@ -1,10 +1,15 @@
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { defaultBrokerEndpoint } from "../src/config";
 import { LAUNCHER_BROWSER_IDLE_URL } from "../src/launcher-browser-host";
+
+// Every test here spawns a fresh Bun process to run cli.ts. That cold start comfortably beats the 5s
+// default in isolation but not when the whole suite is contending for the CPU, where it was killed
+// with exit 143 mid-launch. The work is a subprocess start, not slow logic, so widen the budget.
+setDefaultTimeout(15_000);
 
 async function runCli(args: string[], env: Record<string, string | undefined>) {
   const child = Bun.spawn([

@@ -1,9 +1,11 @@
 # AGENTS.md — codex-chatgpt-web
 
-Cầu nối Codex Responses API → ChatGPT Web UI. Mỗi lượt mở một Temporary Chat mới, nên toàn bộ context
-được nén và gửi lại từ đầu. Ràng buộc chi phối mọi thứ: **trần composer 110.000 ký tự**
-(`CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT`, gói Plus, effort medium/high). Đo được: 153/232 lượt
-chạy trên 95% trần. Mỗi ký tự tiết kiệm được là chỗ cho công việc thật.
+Cầu nối Codex Responses API → ChatGPT Web UI. Từ v4, một lượt **giữ lại conversation** tới khi Codex
+yêu cầu compact, chứ không mở Temporary Chat mới mỗi lượt và gửi lại toàn bộ context như bản cũ. Trần
+composer hiện là **1.048.572 ký tự** (`CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT`, gói Plus, effort
+medium/high) — khớp upstream, không còn là con số 110.000 mà các đợt đo cũ dựa vào. Với trần này,
+replay các rollout gần đây giữ 100% message, prompt lớn nhất ~182k ký tự: pruning và các hằng số timing
+**không còn là nút thắt**. Nút thắt thật là chuyện nén sớm do catalog tĩnh (xem doctor `model-catalog`).
 
 ## Không đổi hằng số nếu chưa biết vì sao nó tồn tại
 
