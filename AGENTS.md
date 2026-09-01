@@ -5,7 +5,9 @@ yêu cầu compact, chứ không mở Temporary Chat mới mỗi lượt và g�
 composer hiện là **1.048.572 ký tự** (`CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT`, gói Plus, effort
 medium/high) — khớp upstream, không còn là con số 110.000 mà các đợt đo cũ dựa vào. Với trần này,
 replay các rollout gần đây giữ 100% message, prompt lớn nhất ~182k ký tự: pruning và các hằng số timing
-**không còn là nút thắt**. Nút thắt thật là chuyện nén sớm do catalog tĩnh (xem doctor `model-catalog`).
+**không còn là nút thắt**. Rủi ro thực tế còn lại là **catalog tĩnh bị drift** — nếu `model_catalog_json`
+bị ghi đè về giới hạn cũ, Codex nén sớm và một bài nhiều ảnh có thể chậm gấp ba (đã từng xảy ra). Doctor
+kiểm điều này ở check `model-catalog`; hiện nó khớp, không có bằng chứng đang ép nén sai.
 
 ## Không đổi hằng số nếu chưa biết vì sao nó tồn tại
 

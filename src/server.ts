@@ -1,5 +1,6 @@
 import { chatGptWebTraceId, createChatGptWebAdapter } from "./adapters/chatgpt-web";
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
+import { scrubLegacyArtifactDiagnostics } from "./adapters/chatgpt-web/artifact-diagnostics";
 import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
 import { timingSafeEqual } from "node:crypto";
 import { chatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
@@ -636,6 +637,12 @@ export function startServer(
     throw new Error("DEV harness configuration cannot start a Responses listener");
   }
   const startedAt = Date.now();
+  // One-time on startup: strip any plaintext user-prompt previews left in the artifact diagnostics by
+  // an older build. Never let a diagnostics chore block the listener from coming up.
+  try {
+    const scrubbed = scrubLegacyArtifactDiagnostics();
+    if (scrubbed > 0) console.info(`[chatgpt-web] scrubbed ${scrubbed} legacy artifact diagnostic previews`);
+  } catch { /* diagnostics scrub is best-effort */ }
   const turnBroker = config.mode === "full" ? TurnBroker.forSocket(config.brokerSocketPath) : undefined;
   if (config.mode === "full") {
     void turnBroker!.listen().catch(error => {

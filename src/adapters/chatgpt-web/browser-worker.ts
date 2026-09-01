@@ -15,6 +15,7 @@ import {
 } from "../../config";
 import { estimateTokens } from "../../lib/token-estimate";
 import { VERSION } from "../../version";
+import { runtimeBuildId } from "../../runtime-manifest";
 import type { CodexProviderConfig } from "../../types";
 import { parseDataUrl } from "../image";
 import {
@@ -1486,11 +1487,12 @@ class ChatGptBrowserDiagnostics {
         ]] : []),
       ]);
       atomicWriteFile(join(this.directory, `${stem}.json`), `${JSON.stringify({
-        // v2 adds runtimeVersion: a checkpoint set is only comparable within one bundle, and this is
-        // how measure-turn-latency tells that send-accepted and assistant-turn-visible came from
-        // different builds instead of averaging them into one meaningless row.
-        version: 2,
+        // v3 adds buildId alongside runtimeVersion: a whole day's hotfixes all report 4.0.7, so the
+        // semver alone still lets measure-turn-latency average across different bundles. The buildId
+        // is the content hash from the build manifest, which is unique per bundle.
+        version: 3,
         runtimeVersion: VERSION,
+        buildId: runtimeBuildId(),
         capturedAt,
         traceId: this.traceId,
         checkpoint,
@@ -3462,6 +3464,10 @@ export class ChatGptBrowserWorker {
   private async stalledTurnDiagnostic(page: Page, responseTurn: Locator): Promise<string> {
     const responseState = await responseTurn.count()
       ? await responseTurn.evaluate(element => {
+        // innerText is undefined on SVGElement, and the [role] selector matches SVG icons, so an
+        // unguarded .trim() here threw and killed the very diagnostic meant to explain a stall
+        // (upstream #239). Read it defensively - this must never be the thing that fails.
+        const renderedText = (node: Element): number => (node as HTMLElement).innerText?.trim().length ?? 0;
         const root = element as HTMLElement;
         const descriptors = [...root.querySelectorAll<HTMLElement>("[role], [data-testid], button, [aria-label]")]
           .filter(candidate => {
@@ -3475,14 +3481,14 @@ export class ChatGptBrowserWorker {
             testId: candidate.getAttribute("data-testid"),
             ariaLabelChars: candidate.getAttribute("aria-label")?.length ?? 0,
             titleChars: candidate.getAttribute("title")?.length ?? 0,
-            textChars: candidate.innerText.trim().length,
+            textChars: renderedText(candidate),
           }));
         return {
-          textChars: root.innerText.trim().length,
+          textChars: renderedText(root),
           htmlChars: root.innerHTML.length,
           descriptors,
         };
-      })
+      }).catch(() => ({ text: "", descriptors: [] }))
       : { text: "", descriptors: [] };
     const overlays = await page.locator('[role="dialog"], [role="alert"], [role="status"]').evaluateAll(elements => (
       elements
@@ -3498,7 +3504,7 @@ export class ChatGptBrowserWorker {
             role: candidate.getAttribute("role"),
             testId: candidate.getAttribute("data-testid"),
             ariaLabelChars: candidate.getAttribute("aria-label")?.length ?? 0,
-            textChars: candidate.innerText.trim().length,
+            textChars: candidate.innerText?.trim().length ?? 0,
           };
         })
     )).catch(() => [] as Array<Record<string, string | null>>);

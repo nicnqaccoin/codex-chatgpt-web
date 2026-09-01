@@ -37,23 +37,28 @@ function checkpointName(fileName: string): string {
   return fileName.replace(/\.json$/, "").replace(/^\d+-/, "");
 }
 
-function turnCheckpoints(directory: string): { checkpoints: Checkpoint[]; runtimeVersion: string } {
+function turnCheckpoints(directory: string): { checkpoints: Checkpoint[]; build: string } {
   const checkpoints: Checkpoint[] = [];
   let runtimeVersion = "unknown";
+  let buildId = "";
   for (const fileName of readdirSync(directory).sort()) {
     if (!fileName.endsWith(".json")) continue;
-    let record: { capturedAt?: string; runtimeVersion?: string };
+    let record: { capturedAt?: string; runtimeVersion?: string; buildId?: string };
     try {
       record = JSON.parse(readFileSync(join(directory, fileName), "utf8")) as typeof record;
     } catch {
       continue;
     }
     if (typeof record.runtimeVersion === "string") runtimeVersion = record.runtimeVersion;
+    if (typeof record.buildId === "string") buildId = record.buildId;
     const at = Date.parse(record.capturedAt ?? "");
     if (Number.isNaN(at)) continue;
     checkpoints.push({ name: checkpointName(fileName), at });
   }
-  return { checkpoints: checkpoints.sort((left, right) => left.at - right.at), runtimeVersion };
+  // Two same-semver builds are different bundles; identify by version+buildId so A/B never averages
+  // across them. Old records with no buildId collapse to the version alone.
+  const build = buildId ? `${runtimeVersion}+${buildId}` : runtimeVersion;
+  return { checkpoints: checkpoints.sort((left, right) => left.at - right.at), build };
 }
 
 const durations = new Map<string, number[]>();
@@ -62,14 +67,14 @@ const perTurnRows: Array<{ turn: string; version: string; totalSec: number; step
 let turns = 0;
 for (const entry of readdirSync(TURNS_ROOT, { withFileTypes: true })) {
   if (!entry.isDirectory()) continue;
-  const { checkpoints, runtimeVersion } = turnCheckpoints(join(TURNS_ROOT, entry.name));
+  const { checkpoints, build } = turnCheckpoints(join(TURNS_ROOT, entry.name));
   if (checkpoints.length < 2) continue;
   if (!Number.isNaN(since) && checkpoints[0]!.at < since) continue;
   if (!Number.isNaN(until) && checkpoints[0]!.at > until) continue;
   turns += 1;
-  versions.set(runtimeVersion, (versions.get(runtimeVersion) ?? 0) + 1);
+  versions.set(build, (versions.get(build) ?? 0) + 1);
   const totalSec = (checkpoints.at(-1)!.at - checkpoints[0]!.at) / 1_000;
-  perTurnRows.push({ turn: entry.name, version: runtimeVersion, totalSec, steps: checkpoints.length });
+  perTurnRows.push({ turn: entry.name, version: build, totalSec, steps: checkpoints.length });
   for (let index = 1; index < checkpoints.length; index += 1) {
     const step = checkpoints[index]!;
     const seconds = (step.at - checkpoints[index - 1]!.at) / 1_000;
@@ -104,7 +109,7 @@ const versionSummary = [...versions.entries()]
   .map(([version, count]) => `${version} (${count})`)
   .join(", ");
 console.log(`${turns} browser turns under ${TURNS_ROOT}`);
-console.log(`runtime versions in window: ${versionSummary}`);
+console.log(`builds in window (version+buildId): ${versionSummary}`);
 if (versions.size > 1) {
   // Checkpoint names change between builds - send-accepted became assistant-turn-visible - so a
   // median mixing two versions is comparing renamed steps. Bound the window with --since/--until.

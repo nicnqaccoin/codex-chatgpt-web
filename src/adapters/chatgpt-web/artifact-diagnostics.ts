@@ -51,6 +51,47 @@ export function appendBounded(target: string, line: string): void {
 }
 
 /**
+ * Records written before the fingerprint change kept latestUserPreview: the first 80 characters of
+ * the user's prompt, in plaintext, on disk. Switching new writes to a digest does nothing for those
+ * already-written records, so this rewrites the existing file once - dropping the plaintext field and
+ * leaving its length behind as latestUserChars. Idempotent: a file with no legacy field is untouched.
+ * Returns how many records were scrubbed so a caller (and a test) can see it did something.
+ */
+export function scrubLegacyArtifactDiagnostics(target = diagnosticsPath()): number {
+  let lines: string[];
+  try {
+    lines = readFileSync(target, "utf8").split("\n").filter(entry => entry.length > 0);
+  } catch {
+    return 0; // No file yet - nothing to scrub.
+  }
+  let scrubbed = 0;
+  const rewritten = lines.map(line => {
+    let record: Record<string, unknown>;
+    try {
+      record = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      return line; // Leave anything unparseable exactly as it is.
+    }
+    if (!("latestUserPreview" in record)) return line;
+    const preview = record.latestUserPreview;
+    delete record.latestUserPreview;
+    if (typeof preview === "string" && record.latestUserChars === undefined) {
+      record.latestUserChars = preview.length;
+    }
+    scrubbed += 1;
+    return JSON.stringify(record);
+  });
+  if (scrubbed > 0) {
+    try {
+      writeFileSync(target, `${rewritten.join("\n")}\n`, "utf8");
+    } catch {
+      return 0; // A diagnostics scrub must never break startup.
+    }
+  }
+  return scrubbed;
+}
+
+/**
  * A turn that publishes a visualization but returns no content reference leaves the Result panel
  * empty with nothing to inspect afterwards: the request that produced it is gone. Record just enough
  * shape to tell which rule missed - and only for that near miss, so a healthy install writes nothing.
