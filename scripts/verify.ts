@@ -1,8 +1,19 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
+
+// The launcher steps below resolve their own dependencies from launcher/node_modules. When it is not
+// installed, bun climbs to the parent node_modules and fails on a missing motion/react with a message
+// that reads like a code fault rather than a setup step. Name the real cause up front.
+const launcherModules = join(root, "launcher", "node_modules");
+if (!existsSync(launcherModules)) {
+  throw new Error(
+    `launcher/node_modules is not installed, so the launcher typecheck and build cannot run.\n`
+    + `Install it first:  bun install --cwd launcher`,
+  );
+}
 const scratch = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-verify-"));
 const runtimeBundle = join(scratch, "runtime");
 

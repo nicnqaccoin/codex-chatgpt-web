@@ -1,5 +1,14 @@
 # Project: codex-chatgpt-web Performance & Reliability Optimization
 
+> **SUPERSEDED — historical roadmap, not current guidance.** Several items here have since been
+> tried and measured as regressions or overtaken by upstream. Do not implement from this file.
+> `AGENTS.md` is the source of truth for what has been attempted and rejected. In particular:
+> - Item 4's "110,000 char ceiling" is obsolete — the medium/high composer limit is now 1,048,572.
+> - Item 6 (reduce the 750ms stability window to 150-250ms) and items 12/M4 (pre-warmed tab pool)
+>   are recorded as regressions in `AGENTS.md`; do not reintroduce them.
+> - Item 10's paste injection was later solved differently upstream (`document.execCommand`).
+> - Item 9's settle sleeps were measured: only three run on a normal turn, ~750ms total.
+
 ## Architecture
 `codex-chatgpt-web` bridges Codex desktop application sessions to the ChatGPT Web UI via a local HTTP proxy server and Electron browser host.
 

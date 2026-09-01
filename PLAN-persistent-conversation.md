@@ -1,3 +1,8 @@
+> **ĐÃ LỖI THỜI — đừng thực hiện theo file này.** Upstream v4 đã có "retained Temporary Chat"
+> theo một thiết kế khác; cờ mà kế hoạch này mô tả không còn được bất kỳ source nào đọc. Con số
+> "trần composer 110.000" bên dưới cũng sai: trần medium/high hiện là 1.048.572. Giữ lại để ghi
+> nhớ hướng đã cân nhắc và vì sao không đi tiếp, không phải để làm theo.
+
 # Kế hoạch: bỏ sàn chỉ dẫn khỏi mỗi lượt
 
 ## Vấn đề, bằng số đo
