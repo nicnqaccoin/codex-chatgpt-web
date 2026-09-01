@@ -29,7 +29,11 @@ test("browser turn orchestration retains owned prompt insertion and semantic sub
   expect(runBrowserTurn).toContain("connectorAttemptBudget");
   expect(workerSource).toContain('.locator("xpath=ancestor::form[1]")');
   expect(workerSource).toContain('.getByTestId("send-button")');
-  expect(workerSource).toContain('await sendButton.press("Enter")');
+  // The Enter press and the visibility wait must run under the send stage budget, not Playwright's
+  // 30s default: a Bigger Context commit makes the editor janky enough that a 30s press expired
+  // before the huge payload could be accepted, losing the whole turn.
+  expect(workerSource).toContain('await sendButton.press("Enter", { timeout: sendActionTimeoutMs })');
+  expect(workerSource).toContain('await sendButton.waitFor({ state: "visible", timeout: sendActionTimeoutMs })');
   expect(workerSource).toContain("await this.waitForSubmissionAccepted(");
   const sendAttachedPrompt = workerSource.slice(
     workerSource.indexOf("  private async sendAttachedPrompt("),
@@ -42,7 +46,7 @@ test("browser turn orchestration retains owned prompt insertion and semantic sub
   const enabledChecked = sendAttachedPrompt.indexOf("if (await sendButton.isEnabled()) break;", rateLimitChecked);
   const sendReady = sendAttachedPrompt.indexOf('await captureDiagnostic?.("send-ready")');
   const sendActivated = sendAttachedPrompt.indexOf("submissionLifecycle?.onSendActivated?.()");
-  const sendPressed = sendAttachedPrompt.indexOf('await sendButton.press("Enter")');
+  const sendPressed = sendAttachedPrompt.indexOf('await sendButton.press("Enter"');
   const submissionWait = sendAttachedPrompt.indexOf("await this.waitForSubmissionAccepted(");
   const submitted = sendAttachedPrompt.indexOf("submissionLifecycle?.onSubmitted?.()");
   expect(sendSettled).toBeGreaterThan(-1);
@@ -1610,8 +1614,10 @@ test("a proven current-turn MCP call accepts only the final browser submission",
   );
   expect(stagingSend).not.toContain("turn.externalProgress");
   expect(finalSend).toContain("turn.externalProgress");
-  expect(stagingSend).not.toMatch(/turn,\s*\n\s*\)/);
-  expect(finalSend).toMatch(/turn,\s*\n\s*\)/);
+  // The final send passes `turn` (its progress + submission lifecycle) followed by the stage budget;
+  // the staging send passes neither `turn` nor its progress.
+  expect(stagingSend).not.toMatch(/\bturn,\s*\n/);
+  expect(finalSend).toMatch(/turn,\s*\n\s*sendStageBudget,/);
 });
 
 test("unrelated ChatGPT alerts are not terminal", async () => {
@@ -2854,8 +2860,12 @@ test("Bigger Context stage sends get a budget sized for their payload", () => {
   expect(worker).toContain("multipartStageSend: 180_000");
   expect(worker).toContain("browserStageTimeouts.multipartStageSend,");
 
-  // The multipart commit lands on a conversation already carrying every staged part.
-  expect(worker).toContain("prepared.multipart ? browserStageTimeouts.multipartStageSend : browserStageTimeouts.send,");
+  // The multipart commit lands on a conversation already carrying every staged part; the budget is
+  // resolved once and applied both as the stage timeout and as the per-action send timeout.
+  expect(worker).toContain("? browserStageTimeouts.multipartStageSend");
+  expect(worker).toContain("const sendStageBudget = prepared.multipart");
+  // The send actions run under that budget, not Playwright's 30s default.
+  expect(worker).toContain('await sendButton.press("Enter", { timeout: sendActionTimeoutMs })');
 
   // The ordinary send budget is unchanged for ordinary prompts.
   expect(worker).toContain("send: 20_000,");

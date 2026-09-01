@@ -2784,12 +2784,17 @@ export class ChatGptBrowserWorker {
     abortSignal?: AbortSignal,
     externalProgress?: ChatGptTurnProgressReader,
     submissionLifecycle?: Pick<BrowserTurn, "onSendActivated" | "onSubmitted">,
+    // The stage budget for this send. A Bigger Context commit attaches a payload orders of magnitude
+    // larger than an ordinary prompt, which makes the Lexical editor janky enough that Playwright's
+    // default 30s action timeout on `press` expires before the page can accept the keypress - even
+    // though the stage itself is allowed 180s. Scale the individual actions to the same budget.
+    sendActionTimeoutMs: number = browserStageTimeouts.send,
   ): Promise<ChatGptSubmissionEvidence> {
     const composer = await this.activeComposer(page);
     const sendButton = composer
       .locator("xpath=ancestor::form[1]")
       .getByTestId("send-button");
-    await sendButton.waitFor({ state: "visible", timeout: browserStageTimeouts.send });
+    await sendButton.waitFor({ state: "visible", timeout: sendActionTimeoutMs });
     await settleChatGptUi();
     const sendEnableDeadline = Date.now() + CHATGPT_SEND_ENABLE_GRACE_MS;
     for (;;) {
@@ -2807,7 +2812,7 @@ export class ChatGptBrowserWorker {
     await captureDiagnostic?.("send-ready");
     const initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0;
     await submissionLifecycle?.onSendActivated?.();
-    await sendButton.press("Enter");
+    await sendButton.press("Enter", { timeout: sendActionTimeoutMs });
     const evidence = await this.waitForSubmissionAccepted(
       page,
       baseline,
@@ -3827,6 +3832,9 @@ export class ChatGptBrowserWorker {
               stageBaseline,
               checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
               turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
+              undefined,
+              undefined,
+              browserStageTimeouts.multipartStageSend,
             ),
           );
           const responseTurn = await this.waitForNewAssistantTurn(
@@ -3926,12 +3934,16 @@ export class ChatGptBrowserWorker {
         this.attachFiles(page, prepared)
       ));
       await diagnostics.capture(page, "file-attachment-complete");
+      // A multipart commit lands on a conversation already carrying every staged part, so it needs
+      // the same acceptance headroom the stages themselves get - both as the stage budget and as the
+      // per-action timeout the send button's waitFor and Enter press run under.
+      const sendStageBudget = prepared.multipart
+        ? browserStageTimeouts.multipartStageSend
+        : browserStageTimeouts.send;
       const finalSubmissionEvidence = await this.runStage(
         turn.traceId,
         "send",
-        // A multipart commit lands on a conversation already carrying every staged part, so it
-        // needs the same acceptance headroom the stages themselves get.
-        prepared.multipart ? browserStageTimeouts.multipartStageSend : browserStageTimeouts.send,
+        sendStageBudget,
         (stageSignal) => this.sendAttachedPrompt(
           page,
           submissionBaseline,
@@ -3939,6 +3951,7 @@ export class ChatGptBrowserWorker {
           turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
           turn.externalProgress,
           turn,
+          sendStageBudget,
         ),
       );
       let responseTurn = await this.waitForNewAssistantTurn(
