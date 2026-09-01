@@ -467,6 +467,16 @@ export function createChatGptWebAdapter(
         timeoutMs === undefined ? undefined : timeoutMs + 60_000,
         traceId,
       );
+      if (activeToken === undefined) {
+        // Feed connector invocations into the turn's progress the instant the broker accepts them,
+        // so the browser's completion gate cannot settle and revoke the token while a call the model
+        // is still waiting on sits queued in the broker. In-process broker only; a remote DEV owner
+        // has no shared progress to raise.
+        structuredBroker?.bindMcpActivity(turnToken, {
+          begin: () => externalProgress.recordMcpRequestBegin(),
+          end: () => externalProgress.recordMcpRequestEnd(),
+        });
+      }
       activeToken = turnToken;
       if (!tokenSettled) {
         tokenSettled = true;

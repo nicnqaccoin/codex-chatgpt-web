@@ -54,6 +54,9 @@ interface TurnChannel {
   compactionResult?: BrokerToolResult;
   compactionDeliveryCount: number;
   batchTimer?: ReturnType<typeof setTimeout>;
+  // Reports connector invocation begin/settle to the turn's progress so completion cannot fire while
+  // a call is still in the broker. In-process only; a remote (DEV) owner never sets it.
+  mcpActivity?: { begin(): void; end(): void };
 }
 
 interface BrokerRequest {
@@ -680,14 +683,38 @@ export class TurnBroker implements TurnBrokerOwner {
       freeform: request.freeform === true,
       ...(request.freeform === true ? { input: request.input ?? "" } : { arguments: request.arguments ?? {} }),
     };
+    const channel = binding.channel;
+    channel.mcpActivity?.begin();
+    // end() must fire exactly once no matter how the invocation settles - result, revoke, error, or
+    // compaction - or activeMcpRequests never returns to zero and completion is blocked forever.
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      channel.mcpActivity?.end();
+    };
     return new Promise<BrokerToolResult>((resolveInvoke, rejectInvoke) => {
-      binding.channel.invocations.set(callId, { request: toolRequest, resolve: resolveInvoke, reject: rejectInvoke });
-      binding.channel.queuedCallIds.push(callId);
+      channel.invocations.set(callId, {
+        request: toolRequest,
+        resolve: value => { settle(); resolveInvoke(value); },
+        reject: error => { settle(); rejectInvoke(error); },
+      });
+      channel.queuedCallIds.push(callId);
       console.info(
-        `[chatgpt-web] broker trace=${binding.channel.traceId} queued call=${callId.slice(0, 17)} tool=${wireName} waiters=${binding.channel.waiters.size}`,
+        `[chatgpt-web] broker trace=${channel.traceId} queued call=${callId.slice(0, 17)} tool=${wireName} waiters=${channel.waiters.size}`,
       );
-      this.scheduleToolWaiters(binding.channel);
+      this.scheduleToolWaiters(channel);
     });
+  }
+
+  /**
+   * Attach the turn's progress hooks to a registered channel so a connector invocation raises
+   * liveness the instant the broker accepts it - closing the window in which the browser could
+   * declare completion and revoke the token before the call became a tool batch. In-process only.
+   */
+  bindMcpActivity(token: string, hooks: { begin(): void; end(): void }): void {
+    const channel = this.channels.get(token);
+    if (channel) channel.mcpActivity = hooks;
   }
 
   private takeQueued(channel: TurnChannel): BrokerToolRequest[] {

@@ -2,6 +2,13 @@ export interface ChatGptExternalTurnProgressSnapshot {
   revision: number;
   lastToolBatchRevision: number;
   activeToolCalls: number;
+  // Connector calls the broker has accepted but the adapter has not yet turned into a tool batch.
+  // activeToolCalls only rises once nextToolBatch delivers a call; a connector invocation sits in the
+  // broker before that, and completion firing in that window revokes the token out from under it. This
+  // is driven straight from broker invoke/settle so the liveness gate sees the call the instant it
+  // arrives, not one round trip later. Optional so a snapshot mirrored from an older build (which had
+  // no such field) still type-checks; absent is read as zero everywhere.
+  activeMcpRequests?: number;
   lastProgressAt?: number;
 }
 
@@ -75,6 +82,7 @@ export class ChatGptExternalTurnProgress extends ChatGptTurnProgressBroadcaster 
   private revision = 0;
   private lastToolBatchRevision = 0;
   private activeToolCalls = 0;
+  private activeMcpRequests = 0;
   private lastProgressAt?: number;
 
   snapshot(): ChatGptExternalTurnProgressSnapshot {
@@ -82,6 +90,8 @@ export class ChatGptExternalTurnProgress extends ChatGptTurnProgressBroadcaster 
       revision: this.revision,
       lastToolBatchRevision: this.lastToolBatchRevision,
       activeToolCalls: this.activeToolCalls,
+      // Omitted at zero so an idle snapshot keeps its historical shape; readers treat absent as zero.
+      ...(this.activeMcpRequests > 0 ? { activeMcpRequests: this.activeMcpRequests } : {}),
       ...(this.lastProgressAt !== undefined ? { lastProgressAt: this.lastProgressAt } : {}),
     };
   }
@@ -102,7 +112,20 @@ export class ChatGptExternalTurnProgress extends ChatGptTurnProgressBroadcaster 
     this.advance(now, "tool_result");
   }
 
-  private advance(now: number, event: "tool_batch" | "tool_result"): void {
+  /** A connector invocation reached the broker. Raises liveness before it becomes a tool batch. */
+  recordMcpRequestBegin(now = Date.now()): void {
+    this.activeMcpRequests += 1;
+    this.advance(now, "mcp_begin");
+  }
+
+  /** That invocation settled (result, revoke, or error). Never drops below zero. */
+  recordMcpRequestEnd(now = Date.now()): void {
+    if (this.activeMcpRequests <= 0) return;
+    this.activeMcpRequests -= 1;
+    this.advance(now, "mcp_end");
+  }
+
+  private advance(now: number, event: "tool_batch" | "tool_result" | "mcp_begin" | "mcp_end"): void {
     if (!Number.isFinite(now)) throw new Error("ChatGPT external progress timestamp must be finite");
     this.revision += 1;
     if (event === "tool_batch") this.lastToolBatchRevision = this.revision;
@@ -124,6 +147,7 @@ export class ChatGptMirroredTurnProgress extends ChatGptTurnProgressBroadcaster 
     revision: 0,
     lastToolBatchRevision: 0,
     activeToolCalls: 0,
+    activeMcpRequests: 0,
   };
 
   snapshot(): ChatGptExternalTurnProgressSnapshot {
@@ -177,5 +201,6 @@ export function chatGptExternalProgressIsLive(
     throw new Error("ChatGPT external progress liveness inputs are invalid");
   }
   return snapshot.activeToolCalls > 0
+    || (snapshot.activeMcpRequests ?? 0) > 0
     || (snapshot.lastProgressAt !== undefined && now - snapshot.lastProgressAt < graceMs);
 }
