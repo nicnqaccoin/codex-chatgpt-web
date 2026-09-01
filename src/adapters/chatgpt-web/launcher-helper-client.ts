@@ -201,7 +201,9 @@ export class LauncherBrowserHelperClient {
               );
               return;
             }
-            void this.send({ type: "abort", id: turn.traceId }).catch(error => {
+            const reason = turn.abortSignal?.reason;
+            const reasonMessage = reason instanceof Error && reason.message ? reason.message : undefined;
+            void this.send({ type: "abort", id: turn.traceId, ...(reasonMessage ? { reason: reasonMessage } : {}) }).catch(error => {
               this.finishWithError(
                 turn.traceId,
                 error instanceof Error ? error : new Error(String(error)),

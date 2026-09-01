@@ -65,7 +65,7 @@ type InputMessage = RunMessage
   | { type: "prepared_selected_ack"; id: string; prepared: CompiledChatGptWebPrompt }
   | { type: "send_activation_ack"; id: string }
   | { type: "progress"; id: string; snapshot: ChatGptExternalTurnProgressSnapshot }
-  | { type: "abort"; id: string }
+  | { type: "abort"; id: string; reason?: string }
   | { type: "shutdown" };
 
 let outputFailure: Error | undefined;
@@ -382,7 +382,12 @@ input.on("line", line => {
       );
     }
   } else if (message.type === "abort") {
-    abortControllers.get(message.id)?.abort();
+    // Carry the daemon's reason across the process boundary. Without it the helper aborts with the
+    // bare "This operation was aborted", which is what made every retired turn look identical in the
+    // trace instead of naming what cancelled it (compaction handoff, prune, turn failure).
+    abortControllers.get(message.id)?.abort(
+      message.reason ? new DOMException(message.reason, "AbortError") : undefined,
+    );
     preparedSelections.get(message.id)?.cancel();
     const waiter = sendActivationWaiters.get(message.id);
     sendActivationWaiters.delete(message.id);

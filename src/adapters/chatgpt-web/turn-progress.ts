@@ -182,6 +182,7 @@ export function assertChatGptTurnProgressSnapshot(
     || !finiteIndex(value.revision)
     || !finiteIndex(value.lastToolBatchRevision)
     || !finiteIndex(value.activeToolCalls)
+    || (value.activeMcpRequests !== undefined && !finiteIndex(value.activeMcpRequests))
     || value.lastToolBatchRevision > value.revision
     || (value.lastProgressAt !== undefined && !Number.isFinite(value.lastProgressAt))
     // Any recorded activity stamps a timestamp, so a frame claiming progress without one is
