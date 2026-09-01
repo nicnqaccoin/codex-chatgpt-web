@@ -38,6 +38,7 @@ import { namespacedToolName, type AdapterEvent, type CodexParsedRequest } from "
 import type { CodexProviderConfig } from "./types";
 import type { ProviderAdapter } from "./adapters/base";
 import { VERSION } from "./version";
+import { runtimeBuildId } from "./runtime-manifest";
 
 type HttpTrackedEndpoint = "models" | "responses" | "compact" | "search" | "unspecified";
 
@@ -677,6 +678,7 @@ export function startServer(
           status: "ok",
           service: "codex-chatgpt-web",
           version: VERSION,
+          buildId: runtimeBuildId(),
           mode: config.mode,
           pid: process.pid,
           port: config.port,
