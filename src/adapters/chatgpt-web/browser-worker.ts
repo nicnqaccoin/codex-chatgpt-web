@@ -14,6 +14,7 @@ import {
   LEGACY_CHATGPT_CONNECTOR_NAMES,
 } from "../../config";
 import { estimateTokens } from "../../lib/token-estimate";
+import { VERSION } from "../../version";
 import type { CodexProviderConfig } from "../../types";
 import { parseDataUrl } from "../image";
 import {
@@ -1485,7 +1486,11 @@ class ChatGptBrowserDiagnostics {
         ]] : []),
       ]);
       atomicWriteFile(join(this.directory, `${stem}.json`), `${JSON.stringify({
-        version: 1,
+        // v2 adds runtimeVersion: a checkpoint set is only comparable within one bundle, and this is
+        // how measure-turn-latency tells that send-accepted and assistant-turn-visible came from
+        // different builds instead of averaging them into one meaningless row.
+        version: 2,
+        runtimeVersion: VERSION,
         capturedAt,
         traceId: this.traceId,
         checkpoint,
